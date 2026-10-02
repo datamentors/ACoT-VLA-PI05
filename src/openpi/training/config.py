@@ -2782,6 +2782,102 @@ _CONFIGS = [
         resume=True,
         save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
     ),
+    # pi05_g2_mixed_vision_action ("MixedWaistVision"): continues MixedWaistControl/95000
+    # (best val) with the VISION encoder (SigLIP + img/head projector) unfrozen as well as the
+    # action expert; the PaliGemma language model stays frozen. Same LR (1e-5) for all trainable
+    # params. Data = the 5 MixedWaistControl train sets + two new sessions:
+    #   folding_towels_infpose002 (ep 26 dropped: 27 NaN rows; val eps 3, 12, 20, 32)
+    #   folding_towels_infpose003 (val ep 7)
+    # 156 train episodes / 480,775 frames; val = the previous 8 episodes unchanged + those 5.
+    # norm_stats recomputed on this 7-set train mix.
+    TrainConfig(
+        name="pi05_g2_mixed_vision_action",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels_s002",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels_s003",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels_s004_s005",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels_inference_pose",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels_infpose002",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_train/folding_towels_infpose003",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_mixed2_train/pi05_g2_mixed2_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=1e-5, decay_steps=100_000, decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_mixed_waist_control/MixedWaistControl/95000/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=100_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+    ),
+    # pi05_g2_ipw_vision_action ("InfPoseWaistVision"): ONE embodiment only -- inference pose
+    # + headset waist. Trained from the BASE manipulation_pi05 (not a G2 fine-tune).
+    # Vision (SigLIP + img/head) and action expert trainable; PaliGemma LLM frozen; LR 1e-5.
+    # Data (lerobot_v21_mp_ipw_*, fresh 90/10 split, see meta/split_source.json):
+    #   folding_towels_inference_pose  train 45 / val 5 (4, 14, 24, 34, 44)
+    #   folding_towels_infpose002      eps 0-9 only: train 9 / val 1 (5)
+    #   folding_towels_infpose003      train 13 / val 1 (7)
+    #   folding_towels_infpose004      train 37 / val 4 (5, 15, 25, 35)
+    #   folding_towels_infpose005      train 42 / val 5 (4, 14, 24, 33, 42)
+    # 146 train episodes / 404,396 frames; 16 val episodes / 43,723 frames. Stats on this train set.
+    TrainConfig(
+        name="pi05_g2_ipw_vision_action",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_inference_pose",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose002",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose003",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose004",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose005",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_ipw_train/pi05_g2_ipw_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=1e-5, decay_steps=100_000, decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=100_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+    ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from
     # /hal/joint_state.position: HALF the true angle on arm joints 1-2 (L1, L2,
