@@ -116,6 +116,13 @@ class ModelTransformFactory(GroupFactory):
 
     # If provided, will determine the default prompt that be used by the model.
     default_prompt: str | None = None
+    # True: center-crop images to square, then resize to 224 (no black letterbox bars).
+    center_crop_images: bool = False
+
+    def _resize_images(self) -> _transforms.DataTransformFn:
+        if self.center_crop_images:
+            return _transforms.CenterCropResizeImages(224, 224)
+        return _transforms.ResizeImages(224, 224)
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
@@ -123,7 +130,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        self._resize_images(),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                         ),
@@ -135,7 +142,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        self._resize_images(),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
@@ -148,7 +155,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        self._resize_images(),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                         ),
@@ -160,7 +167,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        self._resize_images(),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
@@ -172,7 +179,7 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        self._resize_images(),
                         _transforms.TokenizeFASTInputs(
                             _tokenizer.FASTTokenizer(model_config.max_token_len),
                         ),
@@ -1240,6 +1247,10 @@ class LerobotGo1DataConfig(DataConfigFactory):
     # action/waist/position fields in the dataset's meta/info.json.
     include_waist: bool = False
 
+    # If True, images are center-cropped to square then resized to 224 instead of
+    # letterboxed. Applies at training and serving (both use model_transforms).
+    center_crop_images: bool = False
+
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
             inputs=[
@@ -1348,7 +1359,9 @@ class LerobotGo1DataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
 
-        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        model_transforms = ModelTransformFactory(
+            default_prompt=self.default_prompt, center_crop_images=self.center_crop_images
+        )(model_config)
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -2902,6 +2915,48 @@ _CONFIGS = [
             mask_gripper_state=True,
             output_dim=21,
             unmask_waist=True,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        lr_schedule=_optimizer.WSDSchedule(
+            warmup_steps=1_000, peak_lr=1e-5, total_steps=100_000, decay_steps=10_000, end_lr=1e-6, decay_type="sqrt",
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=100_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+    ),
+    # pi05_g2_ipw_vision_action_wsd_crop: pi05_g2_ipw_vision_action_wsd + square center crop
+    # instead of letterbox (head 640x400 -> central 400x400, hands 1280x1056 -> central
+    # 1056x1056, then 224x224). Checkpoints from this config must be served with it.
+    TrainConfig(
+        name="pi05_g2_ipw_vision_action_wsd_crop",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_inference_pose",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose002",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose003",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose004",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose005",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_ipw_train/pi05_g2_ipw_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            center_crop_images=True,
             base_config=DataConfig(prompt_from_task=True),
         ),
         lr_schedule=_optimizer.WSDSchedule(
