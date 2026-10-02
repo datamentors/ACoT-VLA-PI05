@@ -245,6 +245,31 @@ def init_train_state(
     return train_state, state_sharding
 
 
+# Per-module breakdown of grad_norm / param_norm for wandb. Same path regexes as
+# Pi0Config.get_freeze_filter, so a frozen group simply reports grad_norm 0. Logging only:
+# none of these values feed back into the update.
+_PARAM_GROUPS = {
+    "vision": nnx_utils.PathRegex(".*img.*"),
+    "llm": nnx_utils.PathRegex(".*llm(?!.*_1|.*_2).*"),
+    "action_expert": nnx_utils.PathRegex(".*llm.*_1.*"),
+}
+
+
+def _f32_norm(tree) -> at.Array:
+    # Frozen groups are stored in bfloat16 (see init_train_state); square-and-sum per leaf in
+    # float32 so the norm is exact and always a float32 scalar (XLA fuses the cast per leaf).
+    leaves = jax.tree.leaves(tree)
+    if not leaves:
+        return jnp.float32(0.0)
+    return jnp.sqrt(sum(jnp.sum(jnp.square(x.astype(jnp.float32))) for x in leaves))
+
+
+def _group_norms(tree: nnx.State, prefix: str) -> dict[str, at.Array]:
+    out = {f"{prefix}/{name}": _f32_norm(tree.filter(f)) for name, f in _PARAM_GROUPS.items()}
+    out[f"{prefix}/other"] = _f32_norm(tree.filter(nnx.Not(nnx.Any(*_PARAM_GROUPS.values()))))
+    return out
+
+
 @at.typecheck
 def train_step(
     config: _config.TrainConfig,
@@ -300,6 +325,8 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    info.update(_group_norms(grads, "grad_norm"))
+    info.update(_group_norms(kernel_params, "param_norm"))
     return new_state, info
 
 @at.typecheck
