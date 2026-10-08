@@ -394,6 +394,10 @@ class RtcEngine:
         grace and the whole readiness proof (Anvil rearm + model.reset, without a fault)."""
         with self._safety_lock:
             self._invalidate_locked()
+            # Drop the previous episode's last frame: with clock="external" it still looks
+            # fresh (no ticks between episodes), and inferring it would seed the new episode
+            # with a plan for the old scene and arm pose.
+            self._obs = None
             self._latched = False
             self._latch_reason = ""
             self._armed = False
