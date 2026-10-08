@@ -50,6 +50,7 @@ class RtcConfig:
     queue_threshold: int = 30         # LeRobot rtc_queue_threshold default: re-infer when qsize <= this
     pace_hz: float = 30.0             # wall-clock rate of act(); 0 = run as fast as the sim goes
     trace: str = ""                   # jsonl, one line per inference (all episodes, "episode" field)
+    prefix_attention_schedule: str | None = None  # "exp"/"linear"; None = server default (linear)
 
 
 CFG = RtcConfig()
@@ -260,6 +261,8 @@ def build(CoRobotPolicy):
                         "execution_horizon": int(self.cfg.execution_horizon),
                         "max_guidance_weight": float(self.cfg.max_guidance_weight),
                     }
+                    if self.cfg.prefix_attention_schedule:
+                        payload["params"]["rtc"]["prefix_attention_schedule"] = self.cfg.prefix_attention_schedule
                     t_sent = time.monotonic()
                     inner, raw = self._request(payload)
                     rows = _result_rows(inner)

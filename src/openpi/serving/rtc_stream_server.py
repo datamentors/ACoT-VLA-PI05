@@ -93,8 +93,10 @@ class RtcStreamConfig:
     max_obs_age_s: float = 0.25
     # Time allowed after connect for the first healthy observation.
     startup_grace_s: float = 10.0
-    # Waist dims 16:20: "model" = straight from the policy; "hold" = current waist state
-    # (configs that masked 16:19 in training); "auto" = model iff the config unmasked it.
+    # Waist dims 16:21: "model" = straight from the policy; "hold" = dims 16:19 held at the
+    # measured state, dim 20 from the policy (configs that masked 16:19 in training, as
+    # Policy.post_process does for sorting_packages); "off" = all five held (tasks the
+    # policy does not move the waist on); "auto" = model iff the config unmasked it, else hold.
     waist: str = "auto"
     # Optional JSONL trace, one line per committed inference.
     trace: str | None = None
@@ -290,12 +292,14 @@ class RtcEngine:
     The model runs outside ``_safety_lock`` so ``tick`` never waits on the GPU.
     """
 
-    def __init__(self, policy: _policy.Policy, cfg: RtcStreamConfig, *, waist_from_model: bool) -> None:
+    def __init__(self, policy: _policy.Policy, cfg: RtcStreamConfig, *, waist: str) -> None:
         if cfg.clock not in ("wall", "external"):
             raise ValueError(f"clock must be 'wall' or 'external', got {cfg.clock!r}")
         self._policy = policy
         self._cfg = cfg
-        self._waist_from_model = waist_from_model
+        if waist not in ("model", "hold", "off"):
+            raise ValueError(f"waist must be model, hold or off, got {waist!r}")
+        self._waist = waist
         self._safety_lock = threading.RLock()
         self._stop = threading.Event()
         self._trace = open(cfg.trace, "a") if cfg.trace else None  # noqa: SIM115
@@ -553,8 +557,9 @@ class RtcEngine:
                 rows = np.array(out["actions"], dtype=np.float64)
                 if rows.ndim != 2 or len(rows) == 0 or not np.isfinite(rows).all():
                     raise ValueError(f"policy returned an invalid chunk: shape={rows.shape}")
-                if not self._waist_from_model and rows.shape[1] >= 21:
-                    rows[:, 16:20] = state[16:20]
+                if self._waist != "model" and rows.shape[1] >= 21:
+                    held = slice(16, 20) if self._waist == "hold" else slice(16, 21)
+                    rows[:, held] = state[held]
             except Exception as exc:
                 logger.error("[RTC] inference failed: %s\n%s", exc, traceback.format_exc())
                 with self._safety_lock:

@@ -51,20 +51,27 @@ def main(args: Args) -> None:
 
     unmasked = bool(getattr(train_config.data, "unmask_waist", False))
     if args.rtc.waist == "auto":
-        waist_from_model = unmasked
-    elif args.rtc.waist in ("model", "hold"):
-        waist_from_model = args.rtc.waist == "model"
+        waist = "model" if unmasked else "hold"
+    elif args.rtc.waist in ("model", "hold", "off"):
+        waist = args.rtc.waist
     else:
-        raise SystemExit(f"--rtc.waist must be auto, model or hold, got {args.rtc.waist!r}")
-    if waist_from_model and not unmasked:
+        raise SystemExit(f"--rtc.waist must be auto, model, hold or off, got {args.rtc.waist!r}")
+    if waist == "model" and not unmasked:
         logging.warning("waist=model on %s, whose waist dims 16:19 were masked in training", args.config)
-    logging.info("waist dims 16:20: %s", "from the model" if waist_from_model else "held at the measured state")
+    logging.info(
+        "waist: %s",
+        {
+            "model": "dims 16:21 from the model",
+            "hold": "dims 16:20 held at the measured state, dim 20 from the model",
+            "off": "dims 16:21 held at the measured state",
+        }[waist],
+    )
 
     policy = _policy_config.create_trained_policy(
         train_config, args.dir, default_prompt=args.default_prompt, fresh_noise=args.fresh_noise
     )
     logging.info("diffusion noise: %s", "fresh every call" if args.fresh_noise else "fixed key")
-    engine = rtc_stream_server.RtcEngine(policy, args.rtc, waist_from_model=waist_from_model)
+    engine = rtc_stream_server.RtcEngine(policy, args.rtc, waist=waist)
     rtc_stream_server.RtcStreamServer(engine, args.rtc, host=args.host, port=args.port).serve_forever()
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch a Genie Sim benchmark task with the LeRobot-style RTC client (rtc_policy.py).
+"""Launch a Genie Sim benchmark task with the LeRobot-style RTC client (rtc_client_policy.py).
 
     python3 run_rtc.py [rtc flags] -- <app.py args>
 
@@ -41,6 +41,8 @@ def build_parser():
     p.add_argument("--pace-hz", type=float, default=30.0, help="wall-clock act() rate; 0 = unpaced")
     p.add_argument("--trace", default="")
     p.add_argument("--log-level", default="INFO")
+    p.add_argument("--prefix-attention-schedule", choices=("exp", "linear"), default=None,
+                   help="RTC prefix schedule sent to rtc_infer; default: the server's (linear)")
     return p
 
 
@@ -52,7 +54,7 @@ def main():
     logging.basicConfig(level=getattr(logging, a.log_level.upper(), logging.INFO),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    import rtc_policy
+    import rtc_client_policy as rtc_policy
     rtc_policy.CFG = rtc_policy.RtcConfig(
         enabled=not a.no_guidance,
         execution_horizon=a.execution_horizon,
@@ -60,6 +62,7 @@ def main():
         queue_threshold=a.queue_threshold,
         pace_hz=a.pace_hz,
         trace=a.trace,
+        prefix_attention_schedule=a.prefix_attention_schedule,
     )
 
     # corobotpolicy imports Isaac/omni modules, so it cannot be imported before

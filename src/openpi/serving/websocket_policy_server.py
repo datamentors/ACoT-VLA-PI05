@@ -259,6 +259,10 @@ def _add_rtc_to_obs(obs: dict, params: dict) -> None:
     ):
         value = _get(rtc, key)
         options[key] = caster(default if value is None else value)
+    # Optional; absent keeps the model's default schedule (linear).
+    schedule = _get(rtc, "prefix_attention_schedule")
+    if schedule:
+        options["prefix_attention_schedule"] = schedule.decode("utf-8") if isinstance(schedule, bytes) else str(schedule)
     obs["_rtc"] = options
 
 
