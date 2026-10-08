@@ -35,6 +35,9 @@ class Args:
     host: str = "0.0.0.0"
     port: int = 8001
     default_prompt: str | None = None
+    # New diffusion noise every inference (LeRobot/Anvil). --no-fresh-noise reuses one fixed
+    # key, like serve_policy.py's infer/rtc_infer.
+    fresh_noise: bool = True
     rtc: rtc_stream_server.RtcStreamConfig = dataclasses.field(default_factory=rtc_stream_server.RtcStreamConfig)
 
 
@@ -58,8 +61,9 @@ def main(args: Args) -> None:
     logging.info("waist dims 16:20: %s", "from the model" if waist_from_model else "held at the measured state")
 
     policy = _policy_config.create_trained_policy(
-        train_config, args.dir, default_prompt=args.default_prompt, fresh_noise=True
+        train_config, args.dir, default_prompt=args.default_prompt, fresh_noise=args.fresh_noise
     )
+    logging.info("diffusion noise: %s", "fresh every call" if args.fresh_noise else "fixed key")
     engine = rtc_stream_server.RtcEngine(policy, args.rtc, waist_from_model=waist_from_model)
     rtc_stream_server.RtcStreamServer(engine, args.rtc, host=args.host, port=args.port).serve_forever()
 
