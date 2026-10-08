@@ -38,8 +38,15 @@ class Policy(BasePolicy):
         output_transforms: Sequence[_transforms.DataTransformFn] = (),
         sample_kwargs: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        fresh_noise: bool = False,
     ):
-        self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+        # The RTC prefix schedule is a Python string, so it must be static under jit.
+        self._sample_actions = nnx_utils.module_jit(
+            model.sample_actions, static_argnames=("rtc_prefix_attention_schedule",)
+        )
+        # False: the same noise every call (reproducible, the rtc_infer baseline).
+        # True: split the key every call, like LeRobot/Anvil (new noise per chunk).
+        self._fresh_noise = fresh_noise
         self._input_transform = _transforms.compose(transforms)
         self._output_transform = _transforms.compose(output_transforms)
         self._rng = rng or jax.random.key(0)
@@ -102,15 +109,21 @@ class Policy(BasePolicy):
                 "rtc_max_guidance_weight": jnp.asarray(float(rtc.get("max_guidance_weight", 10.0)), dtype=jnp.float32),
                 "rtc_dim_mask": jnp.asarray(dim_mask),
             }
+            # Only the rtc_stream server sends a schedule; rtc_infer keeps the model default.
+            if rtc.get("prefix_attention_schedule") is not None:
+                rtc_kwargs["rtc_prefix_attention_schedule"] = str(rtc["prefix_attention_schedule"])
             rtc_info = {"inference_delay": delay, "execution_horizon": horizon_rows, "prev_rows": int(horizon_rows)}
         # Make a batch and convert to jax.Array.
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
 
         start_time = time.monotonic()
-        # Use a fixed RNG every call so identical payloads produce identical outputs.
-        # We intentionally do NOT split self._rng across calls; advancing it would make
-        # consecutive infers non-reproducible even with the same observation.
-        sample_rng = self._rng
+        if self._fresh_noise:
+            self._rng, sample_rng = jax.random.split(self._rng)
+        else:
+            # Use a fixed RNG every call so identical payloads produce identical outputs.
+            # We intentionally do NOT split self._rng across calls; advancing it would make
+            # consecutive infers non-reproducible even with the same observation.
+            sample_rng = self._rng
         outputs = {
             "state": inputs["state"]
         }
