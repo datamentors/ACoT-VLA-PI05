@@ -32,7 +32,9 @@ Wire protocol (msgpack; one client at a time)
         ``params`` is the corobot ``infer`` params block. ``tick`` is only used with
         clock="external" (simulation): it advances the execution clock by one step and
         is always answered with that step's cmd or status.
-    {"type": "rearm"}
+    {"type": "rearm"}   leave LATCHED; needs fresh observations, restarts readiness
+    {"type": "reset"}   new episode: drop the queue and restart readiness (no fault)
+    Both are answered with a status message.
   server -> client
     {"type": "cmd", "seq", "epoch", "t_server", "action_age_s", "queue", "action": [W]}
         ``action`` is one absolute row in the policy layout (gseries: arms 0:14,
@@ -319,6 +321,7 @@ class RtcEngine:
         self._last_published: np.ndarray | None = None
         self._cmd_seq = 0
         self._n_infer = 0
+        self._ticks = 0  # control steps taken; the clock itself when clock="external"
 
         self._compile()
         self._worker = threading.Thread(target=self._worker_loop, name="rtc-inference", daemon=True)
@@ -359,7 +362,7 @@ class RtcEngine:
             self._latch_reason = ""
             self._armed = False
             self._obs = None
-            self._started_t = time.monotonic()
+            self._started_t = self._now()
             logger.info("[RTC] session started epoch=%d", self._epoch)
 
     def end_session(self) -> None:
@@ -373,7 +376,7 @@ class RtcEngine:
         with self._safety_lock:
             if not self._latched:
                 return False, "not latched"
-            now = time.monotonic()
+            now = self._now()
             if self._obs is None or now - self._obs.receipt_t > self._cfg.max_obs_age_s:
                 return False, "observations are not fresh"
             if self._obs.seq <= self._latch_obs_seq:
@@ -385,6 +388,17 @@ class RtcEngine:
             self._started_t = now
             logger.info("[WATCHDOG] REARMED epoch=%d; readiness proof restarts", self._epoch)
             return True, ""
+
+    def reset(self) -> None:
+        """New episode on the same connection: drop every action, re-run the startup
+        grace and the whole readiness proof (Anvil rearm + model.reset, without a fault)."""
+        with self._safety_lock:
+            self._invalidate_locked()
+            self._latched = False
+            self._latch_reason = ""
+            self._armed = False
+            self._started_t = self._now()
+            logger.info("[RTC] RESET epoch=%d; readiness proof restarts", self._epoch)
 
     def close(self) -> None:
         self._stop.set()
@@ -444,15 +458,27 @@ class RtcEngine:
 
     # -- observation in, command out ----------------------------------------------------
 
+    def _now(self) -> float:
+        """Engine time in seconds: wall clock, or control steps / f with clock="external".
+
+        A simulator runs slower than real time and stalls while rendering; measured in its
+        own steps, observation freshness, action age, inference delay and merge alignment
+        are what the simulated robot experiences, not how slow the host happens to be.
+        """
+        if self._cfg.clock == "external":
+            return self._ticks / self._cfg.control_hz
+        return time.monotonic()
+
     def accept_observation(self, obs: dict) -> None:
         with self._safety_lock:
             self._obs_seq += 1
-            self._obs = _Observation(obs, self._obs_seq, time.monotonic())
+            self._obs = _Observation(obs, self._obs_seq, self._now())
 
     def tick(self) -> dict | None:
         """One control step: pop, authorize and return one command, or None."""
         with self._safety_lock:
-            now = time.monotonic()
+            self._ticks += 1
+            now = self._now()
             if not self._evaluate_locked(now) or not self._ready:
                 return None
             row = self._queue.get()
@@ -487,7 +513,7 @@ class RtcEngine:
         while not self._stop.is_set():
             record = None
             with self._safety_lock:
-                now = time.monotonic()
+                now = self._now()
                 if (
                     self._evaluate_locked(now)
                     and not (self._ready and self._queue.qsize() > threshold)
@@ -531,7 +557,7 @@ class RtcEngine:
                     if epoch == self._epoch:
                         self._trip_locked(f"RTC inference failed: {type(exc).__name__}: {exc}")
                 continue
-            completed_t = time.monotonic()
+            completed_t = self._now()
             with self._safety_lock:
                 self._commit_locked(rows, dispatch, record.receipt_t, epoch, guided, completed_t, delay, out)
 
@@ -545,7 +571,7 @@ class RtcEngine:
 
     def _merge_locked(self, rows: np.ndarray, dispatch: _Dispatch, obs_t: float) -> tuple[int, _Alignment, float | None]:
         """Validate alignment and merge atomically against the captured queue."""
-        merge_t = time.monotonic()
+        merge_t = self._now()
         queue_size, index, _ = self._queue.snapshot()
         alignment = resolve_merge_alignment(
             queue_identity_matches=self._queue is dispatch.queue,
@@ -832,6 +858,9 @@ class RtcStreamServer:
             elif kind == "rearm":
                 ok, reason = self._engine.rearm()
                 await websocket.send(msgpack_numpy.packb({**self._engine.status(), "rearm_ok": ok, "rearm_reason": reason}))
+            elif kind == "reset":
+                self._engine.reset()
+                await websocket.send(msgpack_numpy.packb(self._engine.status()))
             else:
                 await websocket.send(msgpack_numpy.packb({"type": "error", "error": f"unknown message type {kind!r}"}))
         except websockets.ConnectionClosed:
