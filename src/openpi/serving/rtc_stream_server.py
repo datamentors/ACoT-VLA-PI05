@@ -87,6 +87,12 @@ class RtcStreamConfig:
     readiness_index_phase_tolerance_steps: int = 1
     readiness_scheduler_guard_steps: int = 1
     readiness_min_guided_overlap_steps: int = 3
+    # Anvil's readiness gate: no publishing until 5 guided refills prove the timing
+    # margins, and any later margin violation, empty queue or unguided refill latches.
+    # Off: publish from the first chunk, hold the last target when the queue runs dry and
+    # merge whatever arrives (the client-side RTC's behaviour). The input watchdog and the
+    # action-age limit stay on.
+    readiness_gate: bool = True
     # A row is never published more than this long after its observation arrived.
     max_action_age_s: float = 1.5
     # Observations older than this make the inputs unhealthy.
@@ -209,6 +215,7 @@ def resolve_merge_alignment(
     control_hz: float,
     policy_ready: bool,
     index_phase_tolerance_steps: int,
+    allow_empty_queue: bool = False,
 ) -> _Alignment:
     """Anvil ``_resolve_rtc_merge_alignment``: real consumption is the merge delay once
     publishing; before readiness nothing may be consumed and the wall delay is used."""
@@ -234,7 +241,7 @@ def resolve_merge_alignment(
             raise ValueError(f"RTC pre-ready queue was consumed while publication was closed: {consumed} steps")
         merge_delay = wall_delay_steps
     else:
-        if queue_size_at_merge < 1:
+        if queue_size_at_merge < 1 and not allow_empty_queue:
             raise ValueError("RTC action queue emptied before refill merge")
         maximum = math.ceil(runtime_s * control_hz) + index_phase_tolerance_steps
         if consumed > maximum:
@@ -491,8 +498,9 @@ class RtcEngine:
                 return None
             row = self._queue.get()
             if row is None:
-                self._trip_locked("RTC action queue emptied after POLICY_READY")
-                return None
+                if self._cfg.readiness_gate:
+                    self._trip_locked("RTC action queue emptied after POLICY_READY")
+                return None  # gate off: the client holds its last target until a refill lands
             age = now - self._action_source_t
             if age > self._cfg.max_action_age_s:
                 self._trip_locked(f"action age {age:.3f}s > {self._cfg.max_action_age_s:.3f}s")
@@ -593,6 +601,7 @@ class RtcEngine:
             control_hz=self._cfg.control_hz,
             policy_ready=self._ready,
             index_phase_tolerance_steps=self._cfg.readiness_index_phase_tolerance_steps,
+            allow_empty_queue=not self._cfg.readiness_gate,
         )
         if merge_t - obs_t > self._cfg.max_action_age_s:
             raise ValueError(f"RTC result became stale before merge: source_age={merge_t - obs_t:.3f}s")
@@ -647,6 +656,10 @@ class RtcEngine:
             self._max_latency = 0.0
             logger.info("[RTC] WARMUP_DISCARDED epoch=%d latency=%.1fms", epoch, latency * 1000.0)
             self._write_trace({**trace, "phase": "warmup"})
+            return
+
+        if not cfg.readiness_gate:
+            self._commit_ungated_locked(rows, dispatch, obs_t, epoch, guided, source_age, trace)
             return
 
         if source_age > cfg.max_action_age_s:
@@ -773,6 +786,43 @@ class RtcEngine:
                 "[RTC] POLICY_READY epoch=%d latency=%.1fms %s", epoch, alignment.runtime_s * 1000.0, assessment.fields()
             )
 
+    def _commit_ungated_locked(
+        self,
+        rows: np.ndarray,
+        dispatch: _Dispatch,
+        obs_t: float,
+        epoch: int,
+        guided: bool,
+        source_age: float,
+        trace: dict,
+    ) -> None:
+        """readiness_gate=False: merge every fresh result; never latch on timing margins."""
+        if source_age > self._cfg.max_action_age_s:
+            logger.warning("[RTC] STALE_RESULT_DISCARDED epoch=%d source_age=%.3fs", epoch, source_age)
+            return
+        try:
+            queue_size, alignment, seam = self._merge_locked(rows, dispatch, obs_t)
+        except Exception as exc:
+            logger.warning("[RTC] RESULT_DISCARDED epoch=%d: merge failed: %s", epoch, exc)
+            return
+        self._max_latency = max(self._max_latency, alignment.runtime_s)
+        if guided:
+            self._guided_latencies.append(alignment.runtime_s)
+        self._seeded = True
+        if not self._ready and queue_size > 0:
+            self._ready = True
+            logger.info("[RTC] POLICY_READY epoch=%d (readiness gate off)", epoch)
+        self._write_trace(
+            {
+                **trace,
+                "phase": "ungated",
+                "consumed": alignment.consumed_steps,
+                "merge_delay": alignment.merge_delay_steps,
+                "queue": queue_size,
+                "seam_arm_max": seam,
+            }
+        )
+
     def _write_trace(self, record: dict) -> None:
         if self._trace is None:
             return
@@ -869,7 +919,7 @@ class RtcStreamServer:
                 await websocket.send(msgpack_numpy.packb({**self._engine.status(), "rearm_ok": ok, "rearm_reason": reason}))
             elif kind == "reset":
                 self._engine.reset()
-                await websocket.send(msgpack_numpy.packb(self._engine.status()))
+                await websocket.send(msgpack_numpy.packb({**self._engine.status(), "reset_ok": True}))
             else:
                 await websocket.send(msgpack_numpy.packb({"type": "error", "error": f"unknown message type {kind!r}"}))
         except websockets.ConnectionClosed:

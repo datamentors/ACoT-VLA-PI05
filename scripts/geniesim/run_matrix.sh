@@ -85,6 +85,8 @@ start_old_server() {  # id model extra-server-flags...
     export JAX_COMPILATION_CACHE_DIR=$HOME/g2sim/xla-cache
     export G2SIM_FULL_WAIST_TASKS
     G2SIM_FULL_WAIST_TASKS=$(old_waist_env "$model")
+    # shellcheck disable=SC2086
+    [ -n "${SERVER_ENV:-}" ] && export ${SERVER_ENV}
     setsid nohup "$PY" scripts/serve_policy.py --port 8000 "$@" policy:checkpoint \
       --policy.config "$(model_config "$model")" --policy.dir "$(model_dir "$model")" \
       > "$OUT/${id}_server.log" 2>&1 < /dev/null &
@@ -96,6 +98,8 @@ start_stream_server() {  # id model task extra-server-flags...
   local id=$1 model=$2 task=$3; shift 3
   (
     cd "$CODE" || exit 1
+    # shellcheck disable=SC2086
+    [ -n "${SERVER_ENV:-}" ] && export ${SERVER_ENV}
     PYTHONPATH=$PWD/src:$PWD/packages/openpi-client/src XLA_PYTHON_CLIENT_MEM_FRACTION=0.48 \
       setsid nohup "$PY" scripts/serve_rtc_stream.py \
       --config "$(model_config "$model")" --dir "$(model_dir "$model")" --port 8001 --rtc.clock external \
@@ -109,7 +113,7 @@ sim_in_container() {  # id launcher-command-with-args
   docker exec -e DISPLAY=:1 geniesim3 bash -lc "cd /workspace/harness && $2" > "$OUT/$1.log" 2>&1
 }
 
-# variant -> "kind|server flags|client flags"
+# variant -> "kind|server flags|client flags[|server env]"
 variant_spec() {
   case $1 in
     pause)       echo "pause||" ;;
@@ -126,19 +130,38 @@ variant_spec() {
     new_t30)     echo "new|--rtc.queue-threshold 30|" ;;
     new_noguide) echo "new|--rtc.queue-threshold 15 --rtc.max-guidance-weight 0|" ;;
     new_h25)     echo "new|--rtc.queue-threshold 15 --rtc.execution-horizon 25|" ;;
+    # Pipelined sim client: no round-trip wait per sim step (wall-clock TimeOut fairness).
+    new_base_pipe)   echo "new|--rtc.queue-threshold 15|--pipeline" ;;
+    new_linear_pipe) echo "new|--rtc.queue-threshold 15 --rtc.prefix-attention-schedule linear|--pipeline" ;;
+    new_h25_pipe)    echo "new|--rtc.queue-threshold 15 --rtc.execution-horizon 25|--pipeline" ;;
+    # Same, with serve_policy.py's XLA flag (~376 ms instead of ~54 ms per forward).
+    new_base_pipe_xla)   echo "new|--rtc.queue-threshold 15|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
+    new_linear_pipe_xla) echo "new|--rtc.queue-threshold 15 --rtc.prefix-attention-schedule linear|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
+    new_h25_pipe_xla)    echo "new|--rtc.queue-threshold 15 --rtc.execution-horizon 25|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
+    # ...and with the readiness guards of Anvil's deployed strat5482 config (G=0, S=0, overlap 0),
+    # which is what Anvil runs at ~550 ms; the defaults reject most refills at this latency.
+    # Your RTC with XLA's Triton GEMMs (~60 ms), i.e. serve_policy.py without its cuBLAS flag.
+    old_base_triton)   echo "old|--fresh-noise|--queue-threshold 15 --execution-horizon 20 --prefix-attention-schedule exp|OPENPI_KEEP_TRITON_GEMM=1" ;;
+    old_linear_triton) echo "old|--fresh-noise|--queue-threshold 15 --execution-horizon 20 --prefix-attention-schedule linear|OPENPI_KEEP_TRITON_GEMM=1" ;;
+    old_h25_triton)    echo "old|--fresh-noise|--queue-threshold 15 --execution-horizon 25 --prefix-attention-schedule exp|OPENPI_KEEP_TRITON_GEMM=1" ;;
+    # New RTC on cuBLAS without the readiness gate (holds instead of latching, like the client-side RTC).
+    new_base_pipe_xla_nogate)   echo "new|--rtc.queue-threshold 15 --rtc.no-readiness-gate|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
+    new_linear_pipe_xla_nogate) echo "new|--rtc.queue-threshold 15 --rtc.prefix-attention-schedule linear --rtc.no-readiness-gate|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
+    new_h25_pipe_xla_nogate)    echo "new|--rtc.queue-threshold 15 --rtc.execution-horizon 25 --rtc.no-readiness-gate|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
+    new_base_pipe_xla_relaxed) echo "new|--rtc.queue-threshold 15 --rtc.readiness-latency-guard-steps 0 --rtc.readiness-scheduler-guard-steps 0 --rtc.readiness-min-guided-overlap-steps 0|--pipeline|XLA_FLAGS=--xla_gpu_enable_triton_gemm=false" ;;
   esac
 }
 
 run() {  # task__model__variant
-  local id=$1 task model rest variant spec kind sflags cflags edir before after port cfg rc
+  local id=$1 task model rest variant spec kind sflags cflags senv edir before after port cfg rc
   task=${id%%__*}; rest=${id#*__}; model=${rest%%__*}; variant=${rest#*__}
   [ -f "$OUT/${id}_eval.json" ] && { log "SKIP $id (already scored)"; return; }
   spec=$(variant_spec "$variant")
   [ -n "$spec" ] || { log "unknown variant $variant"; return; }
-  IFS="|" read -r kind sflags cflags <<< "$spec"
+  IFS="|" read -r kind sflags cflags senv <<< "$spec"
   edir=$(task_eval_dir "$task"); cfg=$(task_cfg "$task")
   before=$(ls -t "$edir"/evaluate_ret_*.json 2>/dev/null | head -1)
-  log "START $id ($kind server[$sflags] client[$cflags])"
+  log "START $id ($kind server[$sflags] client[$cflags] env[$senv])"
   local app="--config $cfg --benchmark.num_episode=$EP --benchmark.record=true"
   case $kind in
     pause)
@@ -149,13 +172,13 @@ run() {  # task__model__variant
     old)
       port=8000
       # shellcheck disable=SC2086
-      start_old_server "$id" "$model" $sflags || { log "FAIL $id: server never listened"; stop_port 8000; return; }
+      SERVER_ENV=$senv start_old_server "$id" "$model" $sflags || { log "FAIL $id: server never listened"; stop_port 8000; return; }
       sim_in_container "$id" "timeout $RUN_TIMEOUT python3 run_rtc_client.py $cflags --trace /workspace/runs/$id.jsonl -- $app --benchmark.infer_host=$HOST_IP:8000" ;;
     new)
       port=8001
       # shellcheck disable=SC2086
-      start_stream_server "$id" "$model" "$task" $sflags || { log "FAIL $id: server never listened"; stop_port 8001; return; }
-      sim_in_container "$id" "timeout $RUN_TIMEOUT python3 run_rtc_stream.py --trace /workspace/runs/$id.jsonl -- $app --benchmark.infer_host=$HOST_IP:8001" ;;
+      SERVER_ENV=$senv start_stream_server "$id" "$model" "$task" $sflags || { log "FAIL $id: server never listened"; stop_port 8001; return; }
+      sim_in_container "$id" "timeout $RUN_TIMEOUT python3 run_rtc_stream.py $cflags --trace /workspace/runs/$id.jsonl -- $app --benchmark.infer_host=$HOST_IP:8001" ;;
   esac
   rc=$?
   stop_sim

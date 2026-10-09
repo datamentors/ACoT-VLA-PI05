@@ -6,8 +6,13 @@ import socket
 
 import tyro
 
+# GEMMs on cuBLAS instead of XLA's Triton kernels. On the Workstation RTX PRO 6000 this makes
+# one pi0.5 forward ~376 ms instead of ~54 ms; OPENPI_KEEP_TRITON_GEMM=1 keeps Triton.
 os.environ.setdefault("XLA_FLAGS", "")
-if "--xla_gpu_enable_triton_gemm=false" not in os.environ["XLA_FLAGS"]:
+if (
+    os.environ.get("OPENPI_KEEP_TRITON_GEMM") != "1"
+    and "--xla_gpu_enable_triton_gemm=false" not in os.environ["XLA_FLAGS"]
+):
     os.environ["XLA_FLAGS"] += " --xla_gpu_enable_triton_gemm=false"
 
 from openpi.policies import policy as _policy

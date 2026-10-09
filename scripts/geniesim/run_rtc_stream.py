@@ -33,6 +33,8 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pace-hz", type=float, default=30.0, help="wall-clock act() rate; 0 = unpaced")
     p.add_argument("--trace", default="")
+    p.add_argument("--pipeline", action="store_true",
+                   help="send observations without waiting for each reply (sim steps at its own rate)")
     p.add_argument("--log-level", default="INFO")
     return p
 
@@ -52,7 +54,7 @@ def main():
 
     import rtc_stream_policy
 
-    rtc_stream_policy.CFG = rtc_stream_policy.StreamConfig(pace_hz=a.pace_hz, trace=a.trace)
+    rtc_stream_policy.CFG = rtc_stream_policy.StreamConfig(pace_hz=a.pace_hz, trace=a.trace, pipeline=a.pipeline)
 
     # corobotpolicy imports Isaac/omni modules, so it cannot be imported before
     # SimulationApp boots: swap CoRobotPolicy -> RtcStreamPolicy when the benchmark imports it.

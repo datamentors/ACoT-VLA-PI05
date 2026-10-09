@@ -42,17 +42,23 @@ def scores(eval_path: pathlib.Path) -> dict | None:
     steps = collections.defaultdict(lambda: [0.0, 0])
     e2e = 0
     durations = []
+    success_durations = []  # full-task episodes only: time to finish, unskewed by timeouts
     any_pick = 0
+    first_placed = 0  # episodes whose first "Inside" stage scored (sorting: first package in the bin)
     for e in eps:
         s = e["result"]["scores"]
         e2e += int(s["E2E"])
         durations.append(float(e["duration"]))
+        if s["E2E"]:
+            success_durations.append(float(e["duration"]))
         picked = False
         for st in s["STEPS"]:
             steps[st["name"]][0] += float(st["score"])
             steps[st["name"]][1] += 1
             picked |= st["name"].startswith("PickUp") and st["score"] > 0
         any_pick += picked
+        inside = [st["score"] for st in s["STEPS"] if st["name"] == "Inside"]
+        first_placed += bool(inside and inside[0] > 0)
     partial = [
         np.mean([x["score"] for x in e["result"]["scores"]["STEPS"]]) if e["result"]["scores"]["STEPS"] else 0.0
         for e in eps
@@ -62,8 +68,10 @@ def scores(eval_path: pathlib.Path) -> dict | None:
         "e2e": e2e,
         "steps": {k: {"success": v[0], "attempts": v[1]} for k, v in steps.items()},
         "episodes_with_pickup": any_pick,
+        "episodes_first_placed": first_placed,
         "mean_partial": float(np.mean(partial)) if partial else 0.0,
         "duration_p50_s": _pct(durations, 50),
+        "success_duration_p50_s": _pct(success_durations, 50),
     }
 
 
@@ -97,22 +105,25 @@ def stage_times(log_path: pathlib.Path) -> dict | None:
         elif episodes and "[logger.py:76] Action [StepOut] evt: 3" in line:
             episodes[-1]["end"] = ts(line)
     per_stage = collections.defaultdict(list)
+    cumulative = collections.defaultdict(list)  # seconds from episode start to each stage
     stuck = []
     for e in episodes:
         prev = e["start"]
         for name, t in zip(_STAGES, e["done"]):
             per_stage[name].append(t - prev)
+            cumulative[name].append(t - e["start"])
             prev = t
         if e["end"] is not None:
             stuck.append(e["end"] - prev)
     out = {f"{k}_s_p50": _pct(per_stage[k], 50) for k in _STAGES if per_stage[k]}
     out.update({f"{k}_n": len(per_stage[k]) for k in _STAGES if per_stage[k]})
+    out.update({f"{k}_from_start_s_p50": _pct(cumulative[k], 50) for k in _STAGES if cumulative[k]})
     out["after_last_stage_s_p50"] = _pct(stuck, 50)
     return out
 
 
 def stream_timing(server: list[dict], client: list[dict]) -> dict:
-    steady = [x for x in server if x.get("phase") == "steady"]
+    steady = [x for x in server if x.get("phase") in ("steady", "ungated")]
     seams = [x["seam_arm_max"] for x in steady if x.get("seam_arm_max") is not None]
     cmds = [x for x in client if x.get("type") == "cmd"]
     starts = _episode_start_jumps(client)
