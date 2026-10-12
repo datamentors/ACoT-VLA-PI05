@@ -2974,6 +2974,52 @@ _CONFIGS = [
         resume=True,
         save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
     ),
+    # pi05_g2_ipw2_vision_action_wsd_crop: pi05_g2_ipw_vision_action_wsd_crop (fork commits 330cd2a + d0b7bef:
+    # WSD 1e-5 -> 1e-6 over the last 10k + square center crop) on the ipw dataset v2 = the 5 ipw sessions +
+    # folding_towels_infpose_headset_20261001_s01 (train 25 / val 3: eps 4, 14, 24) and _s02 (train 9 / val 1: ep 8)
+    # from s3://ardia-ai-datasets-dev/processed/.../g2a0004-infpose-headset/2026-10-01. 180 train / 20 val eps.
+    # Norm stats recomputed on this 7-set train mix. Base manipulation_pi05 weights.
+    TrainConfig(
+        name="pi05_g2_ipw2_vision_action_wsd_crop",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_inference_pose",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose002",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose003",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose004",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose005",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose_headset_20261001_s01",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw_train/folding_towels_infpose_headset_20261001_s02",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_ipw2_train/pi05_g2_ipw2_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            center_crop_images=True,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        lr_schedule=_optimizer.WSDSchedule(
+            warmup_steps=1_000, peak_lr=1e-5, total_steps=100_000, decay_steps=10_000, end_lr=1e-6, decay_type="sqrt",
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=100_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+    ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from
     # /hal/joint_state.position: HALF the true angle on arm joints 1-2 (L1, L2,
