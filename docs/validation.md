@@ -2,7 +2,19 @@
 
 This repo keeps validation as a sidecar process instead of changing `scripts/train.py`.
 Train writes checkpoints as usual; the validator watches those checkpoint folders,
-computes loss on held-out LeRobot data, and logs `val/*` metrics to Weights & Biases.
+computes loss on held-out LeRobot data, and logs `val/*` metrics to MLflow.
+
+## Tracking server
+
+All scripts log to MLflow. The tracking URI comes from, in order: the `--mlflow-tracking-uri`
+flag, the `MLFLOW_TRACKING_URI` env var, else MLflow's default local store
+`sqlite:///mlflow.db` in the working directory (run from the repo root so train and
+validators share it). With a sqlite store, artifacts (images, tables, config.json) go to
+`./mlruns/` under the working directory, not next to the `.db` file. Browse a local store with:
+
+```bash
+.venv/bin/mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
+```
 
 ## Prepare a validation set
 
@@ -24,7 +36,9 @@ For multiple held-out datasets, repeat `--val-repo-id`.
 export HF_HOME=/tmp/hf-home-$USER
 CONFIG=pi05_genie_sim_manip_20260613
 EXP=my_pi05_run
-WANDB_MODE=online bash scripts/train.sh "$CONFIG" "$EXP"
+export MLFLOW_TRACKING_URI=http://<mlflow-host>:5000   # optional; omit for the local sqlite store
+bash scripts/train.sh "$CONFIG" "$EXP"
+# or: .venv/bin/python scripts/train.py "$CONFIG" --exp-name="$EXP" --mlflow-tracking-uri=http://<mlflow-host>:5000
 ```
 
 Training writes checkpoints to:
@@ -32,6 +46,9 @@ Training writes checkpoints to:
 ```text
 checkpoints/<CONFIG>/<EXP>/<step>/
 ```
+
+The MLflow run id is saved in `checkpoints/<CONFIG>/<EXP>/mlflow_run_id.txt`; `--resume`
+continues that run. Train and validation runs share the tag `group=<EXP>`.
 
 ## Run validation once
 
@@ -42,10 +59,8 @@ checkpoints/<CONFIG>/<EXP>/<step>/
   --val-repo-id "$VAL_REPO" \
   --max-batches 20 \
   --batch-size 32 \
-  --wandb-project ACoT-VLA \
-  --wandb-run-name "${EXP}-val" \
-  --wandb-group "$EXP" \
-  --wandb-mode online
+  --mlflow-run-name "${EXP}-val" \
+  --mlflow-group "$EXP"
 ```
 
 ## Watch checkpoints while fine-tuning
@@ -61,10 +76,8 @@ Run this in a second shell on the workstation:
   --poll-seconds 60 \
   --max-batches 20 \
   --batch-size 32 \
-  --wandb-project ACoT-VLA \
-  --wandb-run-name "${EXP}-val" \
-  --wandb-group "$EXP" \
-  --wandb-mode online
+  --mlflow-run-name "${EXP}-val" \
+  --mlflow-group "$EXP"
 ```
 
 Equivalent with uv if your shell has it on PATH. The `HF_HOME` export gives Hugging Face a writable cache on this workstation:
@@ -106,10 +119,8 @@ Dense validation:
   --mode all-frames \
   --max-samples 128 \
   --watch \
-  --wandb-project ACoT-VLA \
-  --wandb-run-name "${EXP}-action-val" \
-  --wandb-group "$EXP" \
-  --wandb-mode online
+  --mlflow-run-name "${EXP}-action-val" \
+  --mlflow-group "$EXP"
 ```
 
 Episode-start validation:
@@ -122,10 +133,8 @@ Episode-start validation:
   --mode first-frame \
   --max-samples 64 \
   --watch \
-  --wandb-project ACoT-VLA \
-  --wandb-run-name "${EXP}-action-val-first" \
-  --wandb-group "$EXP" \
-  --wandb-mode online
+  --mlflow-run-name "${EXP}-action-val-first" \
+  --mlflow-group "$EXP"
 ```
 
 Action metrics logged:
@@ -137,4 +146,8 @@ Action metrics logged:
 - `val_actions/final_mse`
 - `val_actions/final_mae`
 - `val_actions/dim_XX_mae`
-- `val_actions/sample_table`
+- `val_actions/sample_table/step_XXXXXX.json` (table artifact, Evaluation tab)
+
+To put action metrics in the training run instead of a separate run, start training with
+`VAL_METRICS_JSONL=<file>` and the validator with `--metrics-jsonl <file> --no-mlflow-enabled`;
+`val_actions/*` points land at the checkpoint step they scored.

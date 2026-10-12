@@ -1426,8 +1426,11 @@ class TrainConfig:
     # If true, will resume training from the last checkpoint.
     resume: bool = False
 
-    # If true, will enable wandb logging.
-    wandb_enabled: bool = True
+    # If true, will enable MLflow logging.
+    mlflow_enabled: bool = True
+    # MLflow tracking URI (e.g. http://host:5000). None -> $MLFLOW_TRACKING_URI, else MLflow's default
+    # local store sqlite:///mlflow.db in the working directory.
+    mlflow_tracking_uri: str | None = None
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -3241,7 +3244,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_size_recognize",
@@ -3259,7 +3262,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_grasp_targets",
@@ -3277,7 +3280,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_organize_items",
@@ -3295,7 +3298,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_pack_in_supermarket",
@@ -3313,7 +3316,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_place_block_into_drawer",
@@ -3332,7 +3335,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_bimanual_chip_handover",
@@ -3351,7 +3354,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
     TrainConfig(
         name="s2r_sort_fruit",
@@ -3369,7 +3372,7 @@ _CONFIGS = [
         num_workers=24,
         batch_size=32 * 8,
         save_interval=5000,
-        wandb_enabled=False,
+        mlflow_enabled=False,
     ),
 ]
 

@@ -17,7 +17,6 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
-import wandb
 
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
@@ -27,6 +26,7 @@ import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
+import openpi.training.tracking as _tracking
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
@@ -50,9 +50,7 @@ def init_logging():
     logger.handlers[0].setFormatter(formatter)
 
 
-# TensorBoard mirror. wandb is the upstream logger, but this org's wandb
-# credentials lack write access, so runs go to wandb offline and TensorBoard
-# provides the live view. Purely additive: it never changes training math.
+# TensorBoard mirror of the MLflow training metrics. Purely additive: it never changes training math.
 _tb_writer = None
 
 
@@ -82,13 +80,16 @@ def tb_log(metrics: dict, step: int):
 
 # Held-out validation relay. scripts/validate_actions.py runs as a sidecar process (its
 # own GPU memory, its own crash domain) and appends one JSON line per scored checkpoint
-# to $VAL_METRICS_JSONL. The trainer relays those lines into ITS wandb run, so train and
-# val metrics live in one run instead of two. val_actions/* is plotted against
-# val_actions/checkpoint_step, so each point sits at the checkpoint it scored even though
-# it is relayed a few hundred training steps later. Purely additive: unset -> no-op.
+# to $VAL_METRICS_JSONL. The trainer relays those lines into ITS MLflow run, so train and
+# val metrics live in one run instead of two. MLflow keeps a step per metric key, so each
+# val_actions/* point is logged at the checkpoint it scored even though it is relayed a few
+# hundred training steps later. Purely additive: unset -> no-op.
 _val_path = None
 _val_offset = 0
 _val_relayed: set[int] = set()
+
+# The run every metric goes to; disabled (no-op) until init_mlflow runs.
+_tracker = _tracking.Tracker()
 
 
 def init_val_relay(resuming: bool = False):
@@ -97,20 +98,17 @@ def init_val_relay(resuming: bool = False):
     if not path:
         return
     _val_path = epath.Path(path)
-    wandb.define_metric("val_actions/checkpoint_step")
-    wandb.define_metric("val_actions/*", step_metric="val_actions/checkpoint_step")
     if resuming and _val_path.exists():
         # Records already in the file were relayed by the previous leg of this run;
-        # start after them so the resumed wandb run does not get them twice.
+        # start after them so the resumed MLflow run does not get them twice.
         _val_offset = os.path.getsize(_val_path)
         logging.info(f"Resuming: skipping {_val_offset} bytes of already-relayed validation records")
-    logging.info(f"Relaying validation metrics from {_val_path} into this wandb run")
+    logging.info(f"Relaying validation metrics from {_val_path} into this MLflow run")
 
 
-def relay_val_metrics(step: int) -> None:
-    """Log at most ONE new validator record at training step `step`.
+def relay_val_metrics() -> None:
+    """Log every complete new validator record, each at the checkpoint step it scored.
 
-    One per call: two records logged at the same wandb step would overwrite each other.
     A trailing partial line (validator mid-write) is left for the next call.
     """
     global _val_offset
@@ -120,66 +118,74 @@ def relay_val_metrics(step: int) -> None:
         with open(_val_path, "rb") as f:
             f.seek(_val_offset)
             chunk = f.read()
-        if b"\n" not in chunk:
-            return
-        raw = chunk.split(b"\n", 1)[0]
+    except OSError as e:
+        logging.warning(f"validation relay read failed: {e}")
+        return
+    for raw in chunk.split(b"\n")[:-1]:
         _val_offset += len(raw) + 1
         if not raw.strip():
-            return
-        record = json.loads(raw)
-        metrics = dict(record["metrics"])
-        table = record.get("sample_table")
-        if table:
-            metrics["val_actions/sample_table"] = wandb.Table(columns=table["columns"], data=table["data"])
-        ckpt_step = int(metrics["val_actions/checkpoint_step"])
-        wandb.log(metrics, step=step)
-        tb_log({k: v for k, v in metrics.items() if isinstance(v, (int, float))}, step=ckpt_step)
-        _val_relayed.add(ckpt_step)
-        logging.info(f"Relayed validation of checkpoint {ckpt_step} at train step {step}")
-    except Exception as e:  # never take training down over a validation relay
-        logging.warning(f"validation relay failed: {e}")
+            continue
+        try:
+            record = json.loads(raw)
+            metrics = record["metrics"]
+            ckpt_step = int(metrics["val_actions/checkpoint_step"])
+            _tracker.log_metrics(metrics, step=ckpt_step)
+            table = record.get("sample_table")
+            if table:
+                _tracker.log_table(
+                    f"val_actions/sample_table/step_{ckpt_step:06d}.json", table["columns"], table["data"]
+                )
+            tb_log({k: v for k, v in metrics.items() if isinstance(v, (int, float))}, step=ckpt_step)
+            _val_relayed.add(ckpt_step)
+            logging.info(f"Relayed validation of checkpoint {ckpt_step}")
+        except Exception as e:  # never take training down over a validation relay
+            logging.warning(f"validation relay failed: {e}")
 
 
-def drain_val_metrics(final_step: int, last_logged_step: int) -> None:
+def drain_val_metrics(final_step: int) -> None:
     """After training: wait for the final checkpoint's validation, relaying anything pending."""
     if _val_path is None:
         return
     timeout_s = float(os.getenv("VAL_FINAL_WAIT_S", "1800"))
-    step, waited = last_logged_step, 0.0
+    waited = 0.0
+    relay_val_metrics()
     while final_step not in _val_relayed and waited < timeout_s:
-        before = _val_offset
-        step += 1
-        relay_val_metrics(step)
-        if _val_offset == before:  # nothing new yet
-            time.sleep(30)
-            waited += 30
+        time.sleep(30)
+        waited += 30
+        relay_val_metrics()
     if final_step in _val_relayed:
         logging.info(f"Final checkpoint {final_step} validation relayed")
     else:
         logging.warning(f"Gave up waiting for validation of checkpoint {final_step} after {timeout_s:.0f}s")
 
 
-def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
-    if not enabled:
-        wandb.init(mode="disabled")
-        return
-
+def init_mlflow(config: _config.TrainConfig, *, resuming: bool) -> None:
+    global _tracker
+    # Multi-host: only the first process owns the run.
+    enabled = config.mlflow_enabled and jax.process_index() == 0
     ckpt_dir = config.checkpoint_dir
-    if not ckpt_dir.exists():
+    if enabled and not ckpt_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
-    if resuming:
-        run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
-        wandb.init(id=run_id, resume="must", project=config.project_name)
-    else:
-        wandb.init(
-            name=config.exp_name,
-            config=dataclasses.asdict(config),
-            project=config.project_name,
-        )
-        (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
 
-    if log_code:
-        wandb.run.log_code(epath.Path(__file__).parent.parent)
+    run_id_file = ckpt_dir / "mlflow_run_id.txt"
+    resume_run_id = None
+    if enabled and resuming:
+        if run_id_file.exists():
+            resume_run_id = run_id_file.read_text().strip()
+        else:
+            logging.warning(f"Resuming without {run_id_file} (run predates MLflow?); starting a new MLflow run")
+
+    _tracker = _tracking.start(
+        enabled=enabled,
+        experiment=config.project_name,
+        run_name=config.exp_name,
+        tracking_uri=config.mlflow_tracking_uri,
+        resume_run_id=resume_run_id,
+        tags={"group": config.exp_name, "config_name": config.name},
+        config=dataclasses.asdict(config),
+    )
+    if enabled and resume_run_id is None:
+        run_id_file.write_text(_tracker.run_id)
 
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
@@ -245,7 +251,7 @@ def init_train_state(
     return train_state, state_sharding
 
 
-# Per-module breakdown of grad_norm / param_norm for wandb. Same path regexes as
+# Per-module breakdown of grad_norm / param_norm for MLflow. Same path regexes as
 # Pi0Config.get_freeze_filter, so a frozen group simply reports grad_norm 0. Logging only:
 # none of these values feed back into the update.
 _PARAM_GROUPS = {
@@ -415,7 +421,7 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite if not os.getenv("DEBUG_MODE", default=False) == "true" else True,
         resume=config.resume,
     )
-    init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    init_mlflow(config, resuming=resuming)
     init_tensorboard(config)
     init_val_relay(resuming)
 
@@ -428,12 +434,14 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
+    # Log images from first batch to sanity check. Model images are float32 in [-1, 1].
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+        ((np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1) + 1.0) * 127.5)
+        .clip(0, 255)
+        .astype(np.uint8)
         for i in range(min(5, len(next(iter(batch[0].images.values())))))
     ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    _tracker.log_images("camera_views", images_to_log, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
@@ -472,7 +480,6 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
-    last_logged_step = start_step
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -482,10 +489,9 @@ def main(config: _config.TrainConfig):
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            _tracker.log_metrics(reduced_info, step=step)
             tb_log(reduced_info, step=step)
-            relay_val_metrics(step)
-            last_logged_step = step
+            relay_val_metrics()
             infos = []
         batch = next(data_iter)
 
@@ -494,8 +500,9 @@ def main(config: _config.TrainConfig):
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
-    drain_val_metrics(config.num_train_steps - 1, last_logged_step)
+    drain_val_metrics(config.num_train_steps - 1)
+    _tracker.finish()
 
 
 if __name__ == "__main__":
-    main(_config.cli())
+    _tracking.run_main(main, _config.cli())

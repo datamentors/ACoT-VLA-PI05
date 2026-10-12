@@ -3,7 +3,7 @@
 
 This is intentionally a sidecar to scripts/train.py: point it at a held-out
 LeRobot dataset and either one checkpoint directory or a checkpoint root to
-watch while fine-tuning is running. Metrics are logged to Weights & Biases.
+watch while fine-tuning is running. Metrics are logged to MLflow.
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-import wandb
 
 import openpi.models.model as _model
 import openpi.shared.normalize as _normalize
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.tracking as _tracking
 
 
 def _path(value: str | pathlib.Path) -> pathlib.Path:
@@ -50,16 +50,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Validation data/RNG seed.")
     parser.add_argument("--watch", action="store_true", help="Keep polling checkpoint-root and validate new steps.")
     parser.add_argument("--poll-seconds", type=float, default=60.0, help="Seconds between checkpoint-root polls.")
-    parser.add_argument("--wandb-project", default=None, help="W&B project. Defaults to TrainConfig.project_name.")
-    parser.add_argument("--wandb-run-name", default=None, help="W&B run name for validation metrics.")
-    parser.add_argument("--wandb-group", default=None, help="Optional W&B group, useful to pair train/val runs.")
-    parser.add_argument("--wandb-tag", action="append", default=None, help="Optional W&B tag. Repeatable.")
-    parser.add_argument(
-        "--wandb-mode",
-        choices=("online", "offline", "disabled"),
-        default=None,
-        help="Override W&B mode. If omitted, wandb/env defaults apply.",
-    )
+    _tracking.add_cli_args(parser)
     return parser.parse_args()
 
 
@@ -205,13 +196,14 @@ def validate_checkpoint(
     return metrics
 
 
-def _init_wandb(args: argparse.Namespace, train_config: _config.TrainConfig) -> None:
-    init_kwargs: dict[str, Any] = {
-        "project": args.wandb_project or train_config.project_name,
-        "name": args.wandb_run_name or f"{args.config_name}-validation",
-        "group": args.wandb_group,
-        "tags": args.wandb_tag,
-        "config": {
+def _init_mlflow(args: argparse.Namespace, train_config: _config.TrainConfig) -> _tracking.Tracker:
+    return _tracking.start(
+        enabled=args.mlflow_enabled,
+        experiment=args.mlflow_experiment or train_config.project_name,
+        run_name=args.mlflow_run_name or f"{args.config_name}-validation",
+        tracking_uri=args.mlflow_tracking_uri,
+        tags=_tracking.parse_tags(args.mlflow_group, args.mlflow_tag),
+        config={
             "config_name": args.config_name,
             "checkpoint_dir": args.checkpoint_dir,
             "checkpoint_root": args.checkpoint_root,
@@ -221,10 +213,7 @@ def _init_wandb(args: argparse.Namespace, train_config: _config.TrainConfig) -> 
             "num_workers": args.num_workers,
             "watch": args.watch,
         },
-    }
-    if args.wandb_mode is not None:
-        init_kwargs["mode"] = args.wandb_mode
-    wandb.init(**init_kwargs)
+    )
 
 
 def main() -> None:
@@ -235,7 +224,7 @@ def main() -> None:
 
     train_config = _config.get_config(args.config_name)
     batch_size = args.batch_size or train_config.batch_size
-    _init_wandb(args, train_config)
+    tracker = _init_mlflow(args, train_config)
 
     validated_steps: set[int] = set()
     while True:
@@ -257,7 +246,7 @@ def main() -> None:
                 seed=args.seed,
             )
             metrics["val/checkpoint_step"] = float(step)
-            wandb.log(metrics, step=step if step > 0 else None)
+            tracker.log_metrics(metrics, step=step)
             validated_steps.add(step)
 
         if not args.watch:
@@ -266,8 +255,8 @@ def main() -> None:
             logging.info("No new checkpoints under %s; sleeping %.1fs", args.checkpoint_root, args.poll_seconds)
         time.sleep(args.poll_seconds)
 
-    wandb.finish()
+    tracker.finish()
 
 
 if __name__ == "__main__":
-    main()
+    _tracking.run_main(main)

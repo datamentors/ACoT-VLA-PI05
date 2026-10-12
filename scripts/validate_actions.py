@@ -18,11 +18,11 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
-import wandb
 
 import openpi.policies.policy_config as _policy_config
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.tracking as _tracking
 import openpi.transforms as _transforms
 
 
@@ -78,19 +78,10 @@ def _parse_args() -> argparse.Namespace:
         "--metrics-jsonl",
         default=None,
         help="Append one JSON line per scored checkpoint here. scripts/train.py relays these into the "
-        "training wandb run when started with VAL_METRICS_JSONL pointing at the same file "
-        "(pair with --wandb-mode disabled to avoid a second run).",
+        "training MLflow run when started with VAL_METRICS_JSONL pointing at the same file "
+        "(pair with --no-mlflow-enabled to avoid a second run).",
     )
-    parser.add_argument("--wandb-project", default=None, help="W&B project. Defaults to TrainConfig.project_name.")
-    parser.add_argument("--wandb-run-name", default=None, help="W&B run name for validation metrics.")
-    parser.add_argument("--wandb-group", default=None, help="Optional W&B group, useful to pair train/action-val runs.")
-    parser.add_argument("--wandb-tag", action="append", default=None, help="Optional W&B tag. Repeatable.")
-    parser.add_argument(
-        "--wandb-mode",
-        choices=("online", "offline", "disabled"),
-        default=None,
-        help="Override W&B mode. If omitted, wandb/env defaults apply.",
-    )
+    _tracking.add_cli_args(parser)
     return parser.parse_args()
 
 
@@ -367,8 +358,8 @@ def validate_actions(
     metrics_out.update(_baseline_metrics(sample_metrics, moving_threshold=moving_threshold, gripper_dims=gripper_dims))
     metrics_out.update(_gripper_event_metrics(sample_metrics, gripper_dims=gripper_dims, fps=fps))
 
-    metrics_out["val_actions/sample_table"] = wandb.Table(
-        columns=[
+    metrics_out["val_actions/sample_table"] = {
+        "columns": [
             "raw_index",
             "episode_index",
             "frame_index",
@@ -382,8 +373,8 @@ def validate_actions(
             "dims",
             "infer_ms",
         ],
-        data=rows,
-    )
+        "data": rows,
+    }
     # prune_motor.sh / overnight_v2.sh grep this line's prefix; keep "Action validation <dir> " intact.
     logging.info(
         "Action validation %s mode=%s: mse=%.6f mae=%.6f samples=%d | baseline_hold_mae=%.6f gain_vs_hold=%.4f "
@@ -552,24 +543,22 @@ def _append_metrics_jsonl(path: str, metrics: dict[str, Any]) -> None:
     record: dict[str, Any] = {"metrics": scalars}
     table = metrics.get("val_actions/sample_table")
     if table is not None:
-        record["sample_table"] = {"columns": list(table.columns), "data": table.data}
+        record["sample_table"] = {"columns": list(table["columns"]), "data": table["data"]}
     line = json.dumps(record, default=lambda o: o.item() if hasattr(o, "item") else str(o)) + "\n"
     with open(path, "a") as f:
         f.write(line)
         f.flush()
 
 
-def _init_wandb(args: argparse.Namespace, train_config: _config.TrainConfig) -> None:
-    init_kwargs: dict[str, Any] = {
-        "project": args.wandb_project or train_config.project_name,
-        "name": args.wandb_run_name or f"{args.config_name}-action-validation",
-        "group": args.wandb_group,
-        "tags": args.wandb_tag,
-        "config": vars(args),
-    }
-    if args.wandb_mode is not None:
-        init_kwargs["mode"] = args.wandb_mode
-    wandb.init(**init_kwargs)
+def _init_mlflow(args: argparse.Namespace, train_config: _config.TrainConfig) -> _tracking.Tracker:
+    return _tracking.start(
+        enabled=args.mlflow_enabled,
+        experiment=args.mlflow_experiment or train_config.project_name,
+        run_name=args.mlflow_run_name or f"{args.config_name}-action-validation",
+        tracking_uri=args.mlflow_tracking_uri,
+        tags=_tracking.parse_tags(args.mlflow_group, args.mlflow_tag),
+        config=vars(args),
+    )
 
 
 def main() -> None:
@@ -578,7 +567,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
     args = _parse_args()
     train_config = _config.get_config(args.config_name)
-    _init_wandb(args, train_config)
+    tracker = _init_mlflow(args, train_config)
 
     validated_steps: set[int] = set()
     if args.metrics_jsonl and pathlib.Path(args.metrics_jsonl).exists():
@@ -613,7 +602,9 @@ def main() -> None:
             metrics["val_actions/mode_id"] = 0.0 if args.mode == "all-frames" else 1.0
             if args.metrics_jsonl:
                 _append_metrics_jsonl(args.metrics_jsonl, metrics)
-            wandb.log(metrics, step=step if step > 0 else None)
+            tracker.log_metrics(metrics, step=step)
+            table = metrics["val_actions/sample_table"]
+            tracker.log_table(f"val_actions/sample_table/step_{step:06d}.json", table["columns"], table["data"])
             validated_steps.add(step)
 
         if not args.watch:
@@ -622,8 +613,8 @@ def main() -> None:
             logging.info("No new checkpoints under %s; sleeping %.1fs", args.checkpoint_root, args.poll_seconds)
         time.sleep(args.poll_seconds)
 
-    wandb.finish()
+    tracker.finish()
 
 
 if __name__ == "__main__":
-    main()
+    _tracking.run_main(main)

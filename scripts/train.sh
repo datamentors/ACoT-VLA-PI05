@@ -1,5 +1,4 @@
 export DEBUG_MODE=false
-export WANDB_MODE=offline
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 
 CONFIG_NAME=${1}
