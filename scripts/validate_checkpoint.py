@@ -217,7 +217,9 @@ def _init_mlflow(args: argparse.Namespace, train_config: _config.TrainConfig) ->
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # force=True: openpi imports configure the root logger first, which made this a no-op
+    # and silently dropped every INFO line.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
     args = _parse_args()
     if args.max_batches <= 0:
         raise ValueError("--max-batches must be positive")
