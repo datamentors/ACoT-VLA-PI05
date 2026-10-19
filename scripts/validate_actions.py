@@ -9,12 +9,12 @@ Modes:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import dataclasses
 import json
 import logging
 import pathlib
 import time
-from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -131,7 +131,9 @@ def _scalar_from_item(item: dict[str, Any], key: str) -> int | None:
         return None
 
 
-def _select_indices(dataset: _data_loader.Dataset, *, mode: str, max_samples: int, sample_stride: int | None) -> list[int]:
+def _select_indices(
+    dataset: _data_loader.Dataset, *, mode: str, max_samples: int, sample_stride: int | None
+) -> list[int]:
     if max_samples <= 0:
         raise ValueError("--max-samples must be positive")
     if sample_stride is None:
@@ -194,9 +196,7 @@ def _state_layout(data_config: _config.DataConfig) -> list[int] | None:
 
 def _prepare_raw_dataset(
     train_config: _config.TrainConfig, val_repo_ids: Sequence[str] | None
-) -> tuple[
-    _data_loader.Dataset, _transforms.DataTransformFn, list[int] | None, np.ndarray | None, list[int] | None
-]:
+) -> tuple[_data_loader.Dataset, _transforms.DataTransformFn, list[int] | None, np.ndarray | None, list[int] | None]:
     data_factory = _with_validation_repo(train_config.data, val_repo_ids)
     data_config = data_factory.create(train_config.assets_dirs, train_config.model)
     dataset = _data_loader.create_torch_dataset(data_config, train_config.model)
@@ -235,6 +235,41 @@ def _score_sample(
     live_dims: np.ndarray | None = None,
     state_indices: list[int] | None = None,
 ) -> dict[str, Any]:
+    """Run one policy inference and score its action chunk against the ground truth.
+
+    All errors are in raw (unnormalized) action units: radians for joints, the
+    dataset's gripper units for grippers. Targets are remapped to model order with
+    ``action_indices``; predictions and targets are truncated to the common horizon H
+    and dim count D (capped at ``action_dim``). "Live" dims are the dims whose
+    ``action_mask`` entry is False (all dims when no mask is known). Aggregate scalars
+    use live dims only; ``abs_err``, ``hold_abs_err`` and ``per_dim_mae`` keep all D dims.
+
+    The hold-still baseline predicts ``state[:D]`` (state remapped to model order with
+    ``state_indices`` when the state is long enough) for every step of the chunk.
+
+    Args:
+        policy: Trained policy exposing ``infer(sample) -> {"actions": ...}``.
+        sample: Repacked dataset item with ``actions`` [H, A] and ``state`` [S].
+        action_dim: Optional cap on the number of scored dims.
+        action_indices: Raw-action indices in model order, or None to keep raw order.
+        live_dims: Boolean [D'] mask of trained dims, or None for all dims live.
+        state_indices: Raw-state indices in model order, or None to keep raw order.
+
+    Returns:
+        Dict with per-sample arrays ``abs_err``/``hold_abs_err`` [H, D], ``pred``/``target``
+        [H, D], ``state`` [D], ``live`` [D] bool, ``per_dim_mae`` [D] (mean over H of
+        |pred - target|), and float scalars over live dims: ``mse``/``mae`` (mean over H
+        and live dims of squared / absolute error), ``first_*``/``final_*`` (the same at
+        the first / last chunk step), ``hold_mae``/``hold_first_mae``/``hold_final_mae``
+        (baseline absolute error), ``motion`` (max |state - target| over H and live dims),
+        ``horizon`` (H), ``dims`` (live dim count) and ``infer_ms`` (wall-clock
+        milliseconds of ``policy.infer``, including any JIT compile on the first call).
+
+    Raises:
+        ValueError: If the sample lacks actions or state, the target is too short for
+            ``action_indices``, the policy returns no actions, shapes cannot be aligned,
+            or the state has fewer dims than the target.
+    """
     target_actions = sample.get("actions")
     if target_actions is None:
         raise ValueError("Validation sample does not contain actions")
@@ -309,6 +344,38 @@ def validate_actions(
     moving_threshold: float = 0.3,
     gripper_dims: Sequence[int] = (),
 ) -> dict[str, Any]:
+    """Score one checkpoint's action chunks on held-out frames.
+
+    Loads the policy from ``checkpoint_dir``, picks validation frames with
+    ``_select_indices``, scores each with ``_score_sample`` and averages over samples.
+    Units are raw action units (radians / gripper units); aggregates use live dims only.
+
+    Args:
+        train_config: Training config the checkpoint was trained with.
+        checkpoint_dir: One checkpoint step directory (contains ``params`` and ``assets``).
+        val_repo_ids: Held-out LeRobot repo ids/paths, or None to use the config's repo_id.
+        mode: ``"all-frames"`` (strided frames) or ``"first-frame"`` (one frame_index 0
+            frame per episode, falling back to strided frames).
+        max_samples: Maximum number of scored frames.
+        sample_stride: Frame stride, or None for ``max(1, len(dataset) // max_samples)``.
+        action_dim: Optional cap on the number of scored dims.
+        max_dim_metrics: Number of leading dims that get a ``dim_XX_mae`` metric.
+        moving_threshold: A sample is a motion chunk when its ``motion`` exceeds this.
+        gripper_dims: Model-order gripper dims for the ``gripper/*`` metrics.
+
+    Returns:
+        Dict of ``val_actions/*`` metrics: sample means of the per-sample ``mse``,
+        ``mae``, ``first_*`` and ``final_*`` scalars; ``samples``; ``horizon_mean``;
+        ``dims_mean``; ``infer_ms_mean``; ``checkpoint_step`` (step dir name, 0 if not
+        numeric); ``dim_XX_mae`` (mean over samples and H, all dims, model order); the
+        ``_baseline_metrics`` and ``_gripper_event_metrics`` outputs; and a
+        ``sample_table`` ``wandb.Table`` with one row per scored frame.
+
+    Raises:
+        RuntimeError: If no validation frames are selected.
+        ValueError: If ``max_samples`` or ``sample_stride`` is not positive, or a sample
+            cannot be scored (see ``_score_sample``).
+    """
     logging.info("Loading policy from %s", checkpoint_dir)
     policy = _policy_config.create_trained_policy(train_config, checkpoint_dir)
     dataset, repack, action_indices, live_dims, state_indices = _prepare_raw_dataset(train_config, val_repo_ids)
@@ -333,20 +400,22 @@ def validate_actions(
         episode_index = _scalar_from_item(raw_item, "episode_index")
         frame_index = _scalar_from_item(raw_item, "frame_index")
         sample_metrics.append(metrics)
-        rows.append([
-            raw_index,
-            episode_index,
-            frame_index,
-            metrics["mse"],
-            metrics["mae"],
-            metrics["first_mse"],
-            metrics["first_mae"],
-            metrics["hold_mae"],
-            metrics["motion"],
-            metrics["horizon"],
-            metrics["dims"],
-            metrics["infer_ms"],
-        ])
+        rows.append(
+            [
+                raw_index,
+                episode_index,
+                frame_index,
+                metrics["mse"],
+                metrics["mae"],
+                metrics["first_mse"],
+                metrics["first_mae"],
+                metrics["hold_mae"],
+                metrics["motion"],
+                metrics["horizon"],
+                metrics["dims"],
+                metrics["infer_ms"],
+            ]
+        )
 
     per_dim_stack = np.stack([m["per_dim_mae"] for m in sample_metrics], axis=0)
     metrics_out: dict[str, Any] = {
@@ -426,10 +495,28 @@ def _gain_vs_hold(model_mae: float, hold_mae: float) -> float:
 def _baseline_metrics(
     sample_metrics: list[dict[str, Any]], *, moving_threshold: float, gripper_dims: Sequence[int]
 ) -> dict[str, float]:
-    """Hold-still baseline, gain scores, per-step error, motion/static and gripper breakdowns.
+    """Compute hold-still baseline, gain scores, per-step error, motion/static and gripper breakdowns.
 
     Baseline "hold": a policy that outputs the current state for every step of the chunk,
     i.e. the robot does not move. gain_vs_hold measures how much better the model is.
+    All means below are over samples N, chunk steps H and live dims (the live mask of the
+    first sample), except the gripper metrics, which use ``gripper_dims`` regardless of
+    the live mask.
+
+    Args:
+        sample_metrics: Per-sample outputs of ``_score_sample``; all must share [H, D].
+        moving_threshold: A sample is a motion chunk when its ``motion`` (max |state -
+            target| over H and live dims) exceeds this; otherwise it is a static chunk.
+        gripper_dims: Model-order gripper dims; dims >= D are ignored.
+
+    Returns:
+        Dict of ``val_actions/*`` floats: ``baseline_hold_mae`` (and ``_first``/``_final``
+        at step 0 / H-1); ``gain_vs_hold`` = 1 - model_mae / hold_mae (NaN when
+        hold_mae is 0), and ``gain_vs_hold_last_step`` at step H-1; ``step_error/tXX_mae``
+        and ``step_error/tXX_baseline_hold_mae`` per chunk step; for ``motion_chunks``
+        and ``static_chunks``: ``n``, ``mae``, ``baseline_hold_mae`` and ``gain_vs_hold``
+        (NaN when the group is empty); and ``gripper/mae`` / ``gripper/baseline_hold_mae``
+        when any gripper dim is in range.
     """
     abs_err = np.stack([m["abs_err"] for m in sample_metrics])  # [N, H, D]
     hold_abs = np.stack([m["hold_abs_err"] for m in sample_metrics])
@@ -447,7 +534,9 @@ def _baseline_metrics(
     }
 
     # Error at each step of the chunk (t00 = first action, t29 = last for H=30), model and baseline.
-    for t, (model_t, hold_t) in enumerate(zip(np.mean(model_live, axis=(0, 2)), np.mean(hold_live, axis=(0, 2)))):
+    for t, (model_t, hold_t) in enumerate(
+        zip(np.mean(model_live, axis=(0, 2)), np.mean(hold_live, axis=(0, 2)), strict=True)
+    ):
         out[f"val_actions/step_error/t{t:02d}_mae"] = float(model_t)
         out[f"val_actions/step_error/t{t:02d}_baseline_hold_mae"] = float(hold_t)
 
@@ -498,12 +587,31 @@ def _gripper_events(seq: np.ndarray, mid: float, band: float) -> list[tuple[int,
 def _gripper_event_metrics(
     sample_metrics: list[dict[str, Any]], *, gripper_dims: Sequence[int], fps: float
 ) -> dict[str, float]:
-    """Open/close timing: does the predicted chunk open/close the gripper when the ground truth does?
+    """Score gripper open/close timing: does the predicted chunk toggle when the ground truth does?
 
     Threshold per gripper dim = midpoint of its range over the val samples. Events are threshold
     crossings of [current state, chunk...]. The hold baseline never has events, so there is no
     baseline here: recall is how many real open/closes the model predicted, precision how many
     predicted ones were real, false_toggles the unmatched predicted ones per chunk.
+
+    Per dim, the range [lo, hi] is taken over the state and target values of all samples;
+    a crossing needs to pass mid +/- ``GRIPPER_EVENT_BAND * (hi - lo)``. Dims with
+    hi - lo < 1e-6 are skipped. A predicted event matches a ground-truth one with the same
+    direction within ``GRIPPER_EVENT_TOLERANCE_STEPS`` chunk steps (greedy, nearest first).
+
+    Args:
+        sample_metrics: Per-sample outputs of ``_score_sample`` (needs ``state``, ``target``,
+            ``pred``).
+        gripper_dims: Model-order gripper dims; dims >= D are ignored.
+        fps: Dataset recording rate, used to convert chunk steps to milliseconds.
+
+    Returns:
+        Empty dict when no gripper dim is in range; otherwise ``val_actions/gripper/*``
+        floats: ``gt_events``, ``pred_events``, ``event_recall`` (matched / gt),
+        ``event_precision`` (matched / pred), ``event_f1`` (2 * matched / (gt + pred)),
+        ``onset_error_ms`` (mean |step offset| of matches * 1000 / fps) and
+        ``false_toggles`` ((pred - matched) / number of samples). Ratios with a zero
+        denominator, and onset_error_ms with no matches, are NaN.
     """
     dims = [d for d in gripper_dims if d < sample_metrics[0]["target"].shape[-1]]
     if not dims:
@@ -541,20 +649,28 @@ def _gripper_event_metrics(
         "val_actions/gripper/event_recall": float(recall),
         "val_actions/gripper/event_precision": float(precision),
         "val_actions/gripper/event_f1": float(f1),
-        "val_actions/gripper/onset_error_ms": float(np.mean(onset_errors) * 1000.0 / fps) if onset_errors else float("nan"),
+        "val_actions/gripper/onset_error_ms": float(np.mean(onset_errors) * 1000.0 / fps)
+        if onset_errors
+        else float("nan"),
         "val_actions/gripper/false_toggles": float((n_pred - n_matched) / len(sample_metrics)),
     }
 
 
 def _append_metrics_jsonl(path: str, metrics: dict[str, Any]) -> None:
-    """One complete line per checkpoint, written in a single call so readers never see half a record."""
-    scalars = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float, np.floating, np.integer))}
+    """Append one complete line per checkpoint, written in a single call so readers never see half a record.
+
+    Args:
+        path: JSONL file to append to (created if missing).
+        metrics: Output of ``validate_actions``; scalars go to ``"metrics"`` and the
+            ``val_actions/sample_table`` (if any) to ``"sample_table"``.
+    """
+    scalars = {k: float(v) for k, v in metrics.items() if isinstance(v, int | float | np.floating | np.integer)}
     record: dict[str, Any] = {"metrics": scalars}
     table = metrics.get("val_actions/sample_table")
     if table is not None:
         record["sample_table"] = {"columns": list(table.columns), "data": table.data}
     line = json.dumps(record, default=lambda o: o.item() if hasattr(o, "item") else str(o)) + "\n"
-    with open(path, "a") as f:
+    with pathlib.Path(path).open("a") as f:
         f.write(line)
         f.flush()
 
@@ -573,6 +689,11 @@ def _init_wandb(args: argparse.Namespace, train_config: _config.TrainConfig) -> 
 
 
 def main() -> None:
+    """Parse CLI args and validate one checkpoint, or poll a checkpoint root with ``--watch``.
+
+    Each scored checkpoint is logged to wandb at its step and, with ``--metrics-jsonl``,
+    appended to that file. Steps already recorded in the file are skipped.
+    """
     # force=True: openpi imports configure the root logger first, which made this a no-op
     # and silently dropped every INFO line (including the per-checkpoint summary).
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", force=True)
@@ -583,11 +704,12 @@ def main() -> None:
     validated_steps: set[int] = set()
     if args.metrics_jsonl and pathlib.Path(args.metrics_jsonl).exists():
         # Resumed run appending to the same file: do not re-score checkpoints already in it.
-        for line in open(args.metrics_jsonl):
-            try:
-                validated_steps.add(int(json.loads(line)["metrics"]["val_actions/checkpoint_step"]))
-            except (ValueError, KeyError):
-                continue
+        with pathlib.Path(args.metrics_jsonl).open() as f:
+            for line in f:
+                try:
+                    validated_steps.add(int(json.loads(line)["metrics"]["val_actions/checkpoint_step"]))
+                except (ValueError, KeyError):
+                    continue
         logging.info("Skipping %d checkpoint steps already in %s", len(validated_steps), args.metrics_jsonl)
     while True:
         if args.checkpoint_dir:

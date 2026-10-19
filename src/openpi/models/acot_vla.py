@@ -805,6 +805,24 @@ class ACOT_VLA(_model.BaseModel):
         rtc_max_guidance_weight: float = 10.0,
         rtc_prefix_attention_schedule: str = "linear",
     ) -> _model.Actions:
+        """Sample an action chunk by flow matching from t=1 (noise) to t=0 (actions), with optional RTC guidance.
+
+        RTC guidance applies only to the action expert's denoising loop, not to the coarse action reasoner.
+
+        Args:
+            rng: PRNG key for the initial noise.
+            observation: Batched observation.
+            num_steps: Number of Euler denoising steps.
+            prev_chunk_left_over: Optional [b or 1, ah, ad] (or [ah, ad]) previous chunk's unexecuted rows in
+                normalized model space, re-anchored to the current state and padded to ``ah``. None disables RTC.
+            inference_delay: Scalar int, leading rows that execute before this chunk lands (fully guided).
+            execution_horizon: Scalar int, number of leading rows guided at all; None uses ``action_horizon``.
+            rtc_max_guidance_weight: Scalar upper bound on the RTC guidance weight.
+            rtc_prefix_attention_schedule: Static ramp shape, one of "linear", "exp", "zeros", "ones".
+
+        Returns:
+            Dict with "actions" [b, ah, ad], plus "coarse_actions" when the explicit action reasoner is enabled.
+        """
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.

@@ -9,11 +9,11 @@ watch while fine-tuning is running. Metrics are logged to Weights & Biases.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import dataclasses
 import logging
 import pathlib
 import time
-from collections.abc import Sequence
 from typing import Any
 
 import jax
@@ -45,7 +45,9 @@ def _parse_args() -> argparse.Namespace:
         help="Held-out LeRobot repo/path. Repeat for a MultiLeRobot validation set. Defaults to config repo_id.",
     )
     parser.add_argument("--max-batches", type=int, default=20, help="Validation batches per checkpoint.")
-    parser.add_argument("--batch-size", type=int, default=None, help="Validation batch size. Defaults to config batch_size.")
+    parser.add_argument(
+        "--batch-size", type=int, default=None, help="Validation batch size. Defaults to config batch_size."
+    )
     parser.add_argument("--num-workers", type=int, default=2, help="Torch DataLoader workers for validation.")
     parser.add_argument("--seed", type=int, default=42, help="Validation data/RNG seed.")
     parser.add_argument("--watch", action="store_true", help="Keep polling checkpoint-root and validate new steps.")
@@ -139,6 +141,19 @@ def _find_checkpoint_dirs(checkpoint_root: pathlib.Path) -> list[pathlib.Path]:
 
 
 def _batch_loss(model: _model.BaseModel, rng: jax.Array, batch: tuple[Any, ...]) -> jax.Array:
+    """Compute the mean training loss of one batch with ``train=False``.
+
+    Args:
+        model: Loaded model in eval mode.
+        rng: Key for the loss's noise / timestep sampling.
+        batch: ``(observation, actions)`` or ``(observation, actions, coarse_actions)``.
+
+    Returns:
+        Scalar mean of ``model.compute_loss`` over all of its elements.
+
+    Raises:
+        ValueError: If the batch is not a 2- or 3-tuple.
+    """
     if len(batch) == 3:
         observation, actions, coarse_actions = batch
         return jnp.mean(model.compute_loss(rng, observation, actions, coarse_actions, train=False))
@@ -158,6 +173,32 @@ def validate_checkpoint(
     num_workers: int,
     seed: int,
 ) -> dict[str, float]:
+    """Compute the held-out training loss of one checkpoint.
+
+    Loads ``params`` in bfloat16, builds an unshuffled loader normalized with the
+    checkpoint's own norm stats, and averages the per-batch loss of ``_batch_loss``
+    over up to ``max_batches`` batches. The loss is the model's own training loss in
+    normalized action space; the RNG is reseeded with ``seed`` for every checkpoint.
+
+    Args:
+        train_config: Training config the checkpoint was trained with.
+        checkpoint_dir: One checkpoint step directory (contains ``params`` and ``assets``).
+        val_repo_ids: Held-out LeRobot repo ids/paths, or None to use the config's repo_id.
+        batch_size: Validation batch size.
+        max_batches: Maximum number of batches to score.
+        num_workers: Torch DataLoader workers.
+        seed: Loader and loss RNG seed.
+
+    Returns:
+        Dict with ``val/loss`` (mean of batch losses), ``val/loss_std`` (std of batch
+        losses), ``val/batches``, ``val/examples`` (batches * batch_size),
+        ``val/elapsed_s`` (wall-clock seconds of the scoring loop) and
+        ``val/checkpoint_step`` (step dir name, 0 if not numeric).
+
+    Raises:
+        RuntimeError: If the loader yields no batches.
+        ValueError: If no norm stats can be found for the checkpoint.
+    """
     logging.info("Loading checkpoint from %s", checkpoint_dir)
     model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     model.eval()
@@ -228,6 +269,11 @@ def _init_wandb(args: argparse.Namespace, train_config: _config.TrainConfig) -> 
 
 
 def main() -> None:
+    """Parse CLI args and validate one checkpoint, or poll a checkpoint root with ``--watch``.
+
+    Raises:
+        ValueError: If ``--max-batches`` is not positive.
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = _parse_args()
     if args.max_batches <= 0:

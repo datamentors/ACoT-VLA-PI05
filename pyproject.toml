@@ -131,6 +131,10 @@ force-sort-within-sections = true
 single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
 known-third-party = ["wandb"]
 
+[tool.ruff.lint.pydocstyle]
+# Only applies where "D" is selected: the fork-owned files hook in .pre-commit-config.yaml.
+convention = "google"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

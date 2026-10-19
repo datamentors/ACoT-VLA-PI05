@@ -6,8 +6,13 @@ import socket
 
 import tyro
 
+# GEMMs on cuBLAS instead of XLA's Triton kernels. On the Workstation RTX PRO 6000 this makes
+# one pi0.5 forward ~376 ms instead of ~54 ms; OPENPI_KEEP_TRITON_GEMM=1 keeps Triton.
 os.environ.setdefault("XLA_FLAGS", "")
-if "--xla_gpu_enable_triton_gemm=false" not in os.environ["XLA_FLAGS"]:
+if (
+    os.environ.get("OPENPI_KEEP_TRITON_GEMM") != "1"
+    and "--xla_gpu_enable_triton_gemm=false" not in os.environ["XLA_FLAGS"]
+):
     os.environ["XLA_FLAGS"] += " --xla_gpu_enable_triton_gemm=false"
 
 from openpi.policies import policy as _policy
@@ -72,6 +77,8 @@ class Args:
     port: int = 8000
     # Record the policy's behavior for debugging.
     record: bool = False
+    # New diffusion noise every inference instead of one fixed key (checkpoint policies only).
+    fresh_noise: bool = False
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -168,7 +175,10 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                _config.get_config(args.policy.config),
+                args.policy.dir,
+                default_prompt=args.default_prompt,
+                fresh_noise=args.fresh_noise,
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)

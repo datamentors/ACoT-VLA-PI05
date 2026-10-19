@@ -59,6 +59,22 @@ class WSDSchedule(LRScheduleConfig):
 
     The decay starts at total_steps - decay_steps, so total_steps should match the config's num_train_steps.
     decay_type: "sqrt" (1 - sqrt, Hagele et al. 2024), "linear", or "cosine".
+
+    Phases by step s: [0, warmup_steps) linear from peak_lr / (warmup_steps + 1) to
+    peak_lr; [warmup_steps, total_steps - decay_steps) constant peak_lr; from
+    total_steps - decay_steps on, decay over decay_steps steps, then held at end_lr.
+
+    Attributes:
+        warmup_steps: Length of the linear warmup, in optimizer steps.
+        peak_lr: Learning rate at the end of warmup and through the stable phase.
+        total_steps: Step at which the decay reaches end_lr; set to num_train_steps.
+        decay_steps: Length of the final decay phase, in optimizer steps.
+        end_lr: Learning rate at the end of the decay and after it.
+        decay_type: Shape of the decay with frac = decay step / decay_steps:
+            "sqrt" -> end_lr + (peak_lr - end_lr) * (1 - sqrt(frac));
+            "linear" -> optax.linear_schedule(peak_lr, end_lr, decay_steps);
+            "cosine" -> optax.cosine_decay_schedule(peak_lr, decay_steps,
+            alpha=end_lr / peak_lr).
     """
 
     warmup_steps: int = 1_000
@@ -69,6 +85,14 @@ class WSDSchedule(LRScheduleConfig):
     decay_type: str = "sqrt"
 
     def create(self) -> optax.Schedule:
+        """Build the optax schedule.
+
+        Returns:
+            A schedule mapping optimizer step to learning rate.
+
+        Raises:
+            ValueError: If total_steps - decay_steps < warmup_steps, or decay_type is unknown.
+        """
         decay_start = self.total_steps - self.decay_steps
         if not self.warmup_steps <= decay_start:
             raise ValueError(f"WSD decay_start {decay_start} must be >= warmup_steps {self.warmup_steps}")

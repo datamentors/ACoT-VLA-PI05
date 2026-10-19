@@ -237,31 +237,6 @@ def _policy_action_to_corobot_result(action_dict: dict, embodiment: str = "gseri
     return result
 
 
-def _add_rtc_to_obs(obs: dict, params: dict) -> None:
-    """LeRobot-style RTC request (method "rtc_infer"); the server keeps no RTC state.
-
-    The client owns the action queue (LeRobot ActionQueue) and sends, per request:
-      rtc.prev_actions        [L, W] unexecuted rows of its current chunk, absolute, in the
-                              same layout this server returns (arm 14, grippers 2, waist 5),
-                              or absent/None on the first chunk of an episode
-      rtc.inference_delay     rows expected to execute while this request is in flight
-      rtc.execution_horizon   guided prefix length (LeRobot default 10)
-      rtc.max_guidance_weight LeRobot default 10.0
-    Re-anchoring to the current state happens in Policy.infer.
-    """
-    rtc = _get(params, "rtc") or {}
-    prev = _get(rtc, "prev_actions")
-    options = {"prev_actions": None if prev is None else np.asarray(prev, dtype=np.float64)}
-    for key, caster, default in (
-        ("inference_delay", int, 0),
-        ("execution_horizon", int, 10),
-        ("max_guidance_weight", float, 10.0),
-    ):
-        value = _get(rtc, key)
-        options[key] = caster(default if value is None else value)
-    obs["_rtc"] = options
-
-
 class WebsocketPolicyServer:
     """Serves a policy over WebSocket using the **corobot** JSON-RPC protocol.
 
@@ -319,7 +294,7 @@ class WebsocketPolicyServer:
                 method = _get(req, "method")
                 if isinstance(method, bytes):
                     method = method.decode("utf-8")
-                if method not in ("infer", "rtc_infer"):
+                if method != "infer":
                     await websocket.send(
                         packer.pack({"error": f"unknown method: {method!r}"})
                     )
@@ -330,8 +305,6 @@ class WebsocketPolicyServer:
 
                 try:
                     obs = _corobot_params_to_obs(params, embodiment)
-                    if method == "rtc_infer":
-                        _add_rtc_to_obs(obs, params)
                 except Exception:
                     await websocket.send(
                         packer.pack({"error": f"failed to parse params:\n{traceback.format_exc()}"})
@@ -357,8 +330,6 @@ class WebsocketPolicyServer:
                 model_ms = (_get(action, "policy_timing") or {}).get("infer_ms")
                 if model_ms is not None:
                     resp["server_timing"]["model_ms"] = float(model_ms)
-                if method == "rtc_infer" and _get(action, "rtc") is not None:
-                    resp["rtc"] = _get(action, "rtc")
                 if prev_total_time is not None:
                     resp["server_timing"]["prev_total_ms"] = prev_total_time * 1000.0
 

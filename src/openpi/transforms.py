@@ -206,9 +206,16 @@ class ResizeImages(DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class CenterCropResizeImages(ResizeImages):
-    """Center-crop each [..., h, w, c] image to the target aspect ratio, then resize. No black padding.
+    """Center-crop each [..., h, w, c] image to the target aspect ratio, then resize.
 
-    For 224x224 this keeps the central square (640x400 -> 400x400), so the sides of wide frames are dropped.
+    Replaces letterbox padding with cropping: for 224x224 a 400x640 (h x w) frame keeps its central 400x400
+    square, so the sides of wide frames are dropped. Rounding of the crop size can still leave up to ~1 px of
+    padding for non-square targets.
+
+    Attributes:
+        height: Target height in pixels.
+        width: Target width in pixels.
+        key: Data key holding the dict of camera images.
     """
 
     def __call__(self, data: DataDict) -> DataDict:
