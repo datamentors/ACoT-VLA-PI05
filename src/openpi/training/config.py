@@ -3123,6 +3123,57 @@ _CONFIGS = [
         resume=True,
         save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
     ),
+    # pi05_g2_ipw4_vision_action_wsd_crop_ft3: pi05_g2_ipw4_vision_action_wsd_crop_ft (same ipw4 data + stats, model,
+    # freeze, crop, bs, peak/end LR) as a NEW 50k-step WSD cycle (1k warmup, flat 1e-5, sqrt decay to 1e-6 over the
+    # last 5k) FROM InfPoseWaistVisionWsdCropFt2/98000 (best of Ft2, val mae 0.03054). No new data.
+    TrainConfig(
+        name="pi05_g2_ipw4_vision_action_wsd_crop_ft3",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_inference_pose",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose002",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose003",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose004",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose005",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261001_s01",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261001_s02",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261002_s01",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261002_s02",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261006_s01",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261007_s01",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261008_s01",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261008_s02",
+                "/home/datamentors/g2sim/data/lerobot_v21_mp_ipw4_train/folding_towels_infpose_headset_20261012_s01",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_ipw4_train/pi05_g2_ipw4_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            center_crop_images=True,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        lr_schedule=_optimizer.WSDSchedule(
+            warmup_steps=1_000, peak_lr=1e-5, total_steps=50_000, decay_steps=5_000, end_lr=1e-6, decay_type="sqrt",
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_ipw4_vision_action_wsd_crop_ft/InfPoseWaistVisionWsdCropFt2/98000/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=50_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+    ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from
     # /hal/joint_state.position: HALF the true angle on arm joints 1-2 (L1, L2,
