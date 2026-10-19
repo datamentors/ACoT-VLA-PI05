@@ -53,6 +53,51 @@ class RsqrtDecaySchedule(LRScheduleConfig):
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class WSDSchedule(LRScheduleConfig):
+    """Warmup-Stable-Decay: linear warmup, constant peak_lr, then decay to end_lr over the last decay_steps.
+
+    The decay starts at total_steps - decay_steps, so total_steps should match the config's num_train_steps.
+    decay_type: "sqrt" (1 - sqrt, Hagele et al. 2024), "linear", or "cosine".
+    """
+
+    warmup_steps: int = 1_000
+    peak_lr: float = 1e-5
+    total_steps: int = 100_000
+    decay_steps: int = 10_000
+    end_lr: float = 1e-6
+    decay_type: str = "sqrt"
+
+    def create(self) -> optax.Schedule:
+        decay_start = self.total_steps - self.decay_steps
+        if not self.warmup_steps <= decay_start:
+            raise ValueError(f"WSD decay_start {decay_start} must be >= warmup_steps {self.warmup_steps}")
+        if self.decay_type == "linear":
+            decay = optax.linear_schedule(self.peak_lr, self.end_lr, self.decay_steps)
+        elif self.decay_type == "cosine":
+            decay = optax.cosine_decay_schedule(self.peak_lr, self.decay_steps, alpha=self.end_lr / self.peak_lr)
+        elif self.decay_type == "sqrt":
+
+            def decay(step):
+                frac = jnp.clip(step / self.decay_steps, 0.0, 1.0)
+                return self.end_lr + (self.peak_lr - self.end_lr) * (1.0 - jnp.sqrt(frac))
+
+        else:
+            raise ValueError(f"unknown WSD decay_type: {self.decay_type!r}")
+        return optax.join_schedules(
+            [
+                optax.linear_schedule(
+                    init_value=self.peak_lr / (self.warmup_steps + 1),
+                    end_value=self.peak_lr,
+                    transition_steps=self.warmup_steps,
+                ),
+                optax.constant_schedule(self.peak_lr),
+                decay,
+            ],
+            [self.warmup_steps, decay_start],
+        )
+
+
 @runtime_checkable
 class OptimizerConfig(Protocol):
     def create(
