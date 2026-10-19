@@ -2,7 +2,7 @@
 
 The server owns the action queue and the execution clock and streams one absolute
 command per tick; see src/openpi/serving/rtc_stream_server.py for the protocol.
-The stateless corobot endpoint (scripts/serve_policy.py, methods infer/rtc_infer)
+The request/response corobot endpoint (scripts/serve_policy.py, method infer)
 is unchanged.
 
     uv run scripts/serve_rtc_stream.py \
@@ -36,7 +36,7 @@ class Args:
     port: int = 8001
     default_prompt: str | None = None
     # New diffusion noise every inference (LeRobot/Anvil). --no-fresh-noise reuses one fixed
-    # key, like serve_policy.py's infer/rtc_infer.
+    # key, like serve_policy.py's infer.
     fresh_noise: bool = True
     rtc: rtc_stream_server.RtcStreamConfig = dataclasses.field(default_factory=rtc_stream_server.RtcStreamConfig)
 

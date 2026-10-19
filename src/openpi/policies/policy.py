@@ -22,7 +22,7 @@ logger = logging.getLogger("openpi.policy")
 
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
-# LeRobot-style RTC request, set by the websocket server for method "rtc_infer":
+# LeRobot-style RTC request, set by the RTC stream server (serving/rtc_stream_server.py):
 #   {"prev_actions": [L, W] absolute leftover in the policy's output layout (or None),
 #    "inference_delay": int, "execution_horizon": int, "max_guidance_weight": float}
 _RTC_OPTIONS_KEY = "_rtc"
@@ -44,7 +44,7 @@ class Policy(BasePolicy):
         self._sample_actions = nnx_utils.module_jit(
             model.sample_actions, static_argnames=("rtc_prefix_attention_schedule",)
         )
-        # False: the same noise every call (reproducible, the rtc_infer baseline).
+        # False: the same noise every call (reproducible).
         # True: split the key every call, like LeRobot/Anvil (new noise per chunk).
         self._fresh_noise = fresh_noise
         self._input_transform = _transforms.compose(transforms)
@@ -109,7 +109,7 @@ class Policy(BasePolicy):
                 "rtc_max_guidance_weight": jnp.asarray(float(rtc.get("max_guidance_weight", 10.0)), dtype=jnp.float32),
                 "rtc_dim_mask": jnp.asarray(dim_mask),
             }
-            # Only the rtc_stream server sends a schedule; rtc_infer keeps the model default.
+            # Absent keeps the model default schedule (linear).
             if rtc.get("prefix_attention_schedule") is not None:
                 rtc_kwargs["rtc_prefix_attention_schedule"] = str(rtc["prefix_attention_schedule"])
             rtc_info = {"inference_delay": delay, "execution_horizon": horizon_rows, "prev_rows": int(horizon_rows)}

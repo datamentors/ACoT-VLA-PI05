@@ -163,14 +163,14 @@ A status message, sent once per second and whenever the state changes:
 
 ### Genie Sim
 
-`scripts/geniesim/` has the Genie Sim client (`run_rtc_stream.py`, use `--pipeline`), the launcher
-(`sim_rtc_stream.sh`) and the comparison driver (`run_matrix.sh`). Run the server with
+`scripts/geniesim/` has the Genie Sim client (`run_rtc_stream.py`, use `--pipeline`) and the launcher
+(`sim_rtc_stream.sh`). Run the server with
 `--rtc.clock external` for Genie Sim, whose simulated time does not match wall time.
 
 ## Serving: request/response mode
 
-The original mode: the client sends one observation and gets back a whole action chunk, then decides
-how to play it (pause per chunk, or its own client-side RTC queue).
+The original mode (pause per inference): the client sends one observation, gets back a whole action
+chunk, and plays it before asking again.
 
 ```bash
 uv run scripts/serve_policy.py --port 8000 \
@@ -201,19 +201,6 @@ reply = msgpack.unpackb(ws.recv(), raw=False)
 `task_name` decides which waist dims are returned: `sorting_packages*` returns all five (dims 16–19
 held at the current state), tasks listed in the `G2SIM_FULL_WAIST_TASKS` environment variable return
 all five from the model, any other task returns no waist.
-
-For client-side RTC, use `"method": "rtc_infer"` and add the unexecuted rows of the client's current
-chunk:
-
-```python
-"rtc": {
-    "prev_actions": leftover_rows,      # list of rows, absolute, same layout as the response; None for the first chunk
-    "inference_delay": 10,              # rows that will run while this request is in flight
-    "execution_horizon": 20,
-    "max_guidance_weight": 10.0,
-    "prefix_attention_schedule": "exp", # optional, default "linear"
-}
-```
 
 ### Response
 
