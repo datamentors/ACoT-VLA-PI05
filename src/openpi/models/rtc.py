@@ -35,11 +35,24 @@ def prefix_weights(
     schedule: str,
     dtype: jnp.dtype,
 ) -> jax.Array:
-    """LeRobot ``get_prefix_weights(start, end, total)`` with traced start/end.
+    """Compute LeRobot ``get_prefix_weights(start, end, total)`` with traced start/end.
 
-    ones on [0, start), a ramp on [start, end), zeros on [end, total).
+    Ones on [0, start), a ramp on [start, end), zeros on [end, total).
     LINEAR ramp is ``linspace(1, 0, n + 2)[1:-1]`` with ``n = end - start``,
     i.e. ``w_i = 1 - (i - start + 1) / (n + 1)``.
+
+    Args:
+        total_steps: Static chunk length ``ah`` (action horizon).
+        start: Scalar int, inference delay; clamped to ``end``. Rows before it get weight 1.
+        end: Scalar int, execution horizon; rows from it on get weight 0.
+        schedule: Static ramp shape, one of "linear", "exp", "zeros", "ones".
+        dtype: Output dtype.
+
+    Returns:
+        [ah] per-row prefix weights in [0, 1].
+
+    Raises:
+        ValueError: If ``schedule`` is not a known schedule.
     """
     idx = jnp.arange(total_steps, dtype=jnp.int32)
     end = jnp.asarray(end, dtype=jnp.int32)
@@ -61,7 +74,20 @@ def prefix_weights(
 
 
 def guidance_weight(time: jax.Array, max_guidance_weight: jax.Array, dtype: jnp.dtype) -> jax.Array:
-    """LeRobot's clamped guidance weight; ``tau = 1 - time``."""
+    """Compute LeRobot's clamped RTC guidance weight.
+
+    Uses ``tau = 1 - time`` (t=1 noise -> t=0 actions) and
+    ``w = min((1 - tau) / tau * ((1 - tau)^2 + tau^2) / (1 - tau)^2, max_guidance_weight)``,
+    with infinities (``tau = 0``) mapped to ``max_guidance_weight``.
+
+    Args:
+        time: Scalar flow-matching time in (0, 1].
+        max_guidance_weight: Scalar upper bound on the weight.
+        dtype: Compute and output dtype.
+
+    Returns:
+        Scalar guidance weight.
+    """
     tau = 1.0 - jnp.asarray(time, dtype=dtype)
     max_w = jnp.asarray(max_guidance_weight, dtype=dtype)
     one_minus_tau_sq = (1.0 - tau) ** 2
@@ -83,16 +109,26 @@ def guided_velocity(
     prefix_attention_schedule: str = "linear",
     dim_mask: jax.Array | None = None,
 ) -> jax.Array:
-    """RTC-guided velocity (LeRobot ``denoise_step``).
+    """Compute the RTC-guided velocity (LeRobot ``denoise_step``).
+
+    Time runs t=1 (noise) -> t=0 (actions); the caller integrates
+    ``x_t + dt * v`` with ``dt < 0``.
 
     Args:
-        x_t: [B, T, A] current noisy chunk.
-        prev_chunk_left_over: [B or 1, T, A] previous chunk's unexecuted rows in
-            model space, already re-anchored to the current state and padded to T.
+        x_t: [b, ah, ad] current noisy chunk.
+        time: Scalar flow-matching time in (0, 1].
+        denoise_fn: Callable mapping [b, ah, ad] ``x_t`` to the unguided velocity [b, ah, ad].
+        prev_chunk_left_over: [b or 1, ah, ad] (or [ah, ad]) previous chunk's unexecuted rows
+            in model space, already re-anchored to the current state and padded to ``ah``.
             None -> plain ``denoise_fn(x_t)``.
-        inference_delay: rows that will execute before this chunk lands (hard prefix).
-        execution_horizon: rows of the prefix that are guided at all.
-        dim_mask: optional [A] 0/1 mask of action dims the leftover is valid for.
+        inference_delay: Scalar int, rows that will execute before this chunk lands (hard prefix).
+        execution_horizon: Scalar int, rows of the prefix that are guided at all.
+        max_guidance_weight: Scalar upper bound on the guidance weight.
+        prefix_attention_schedule: Static ramp shape, one of "linear", "exp", "zeros", "ones".
+        dim_mask: Optional [ad] 0/1 mask of action dims the leftover is valid for.
+
+    Returns:
+        [b, ah, ad] guided velocity.
     """
     v_t = denoise_fn(x_t)
     if prev_chunk_left_over is None:

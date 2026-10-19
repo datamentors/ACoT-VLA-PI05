@@ -37,6 +37,24 @@ _CAMERAS = {"head": "top_head", "hand_left": "hand_left", "hand_right": "hand_ri
 
 @dataclasses.dataclass
 class Args:
+    """Command-line arguments (parsed by tyro).
+
+    Attributes:
+        dataset: LeRobot v2.1 dataset root (``data/``, ``videos/``, ``meta/``).
+        uri: Websocket URI of serve_rtc_stream.py.
+        episode: Episode index to replay.
+        hz: Observation send rate, Hz.
+        seconds: Replay length, seconds (capped at the episode length).
+        external_clock: Send tick=true with every observation (server --rtc.clock external).
+        max_side: Longest image side sent, pixels.
+        jpeg_quality: JPEG quality, 0-100.
+        prompt: Task prompt; None = first task in meta/tasks.jsonl.
+        robot_type: corobot robot_type sent with each observation.
+        pause_at: Seconds into the replay at which to pause observations; None = never.
+        pause_s: Pause length, seconds; rearm is sent after resuming.
+        trace: Optional JSONL path for every received message.
+    """
+
     dataset: str
     uri: str = "ws://127.0.0.1:8001"
     episode: int = 0
@@ -76,10 +94,18 @@ def _policy_layout(raw: np.ndarray) -> np.ndarray:
 
 
 def main(args: Args) -> None:
+    """Replay one episode open loop into the server and print the command-stream report.
+
+    Observations follow the recording (not the commands); a reader thread collects every
+    server message, stamped with its arrival time and the frame being sent.
+
+    Args:
+        args: Parsed command-line arguments.
+    """
     root = pathlib.Path(args.dataset).expanduser()
-    df = pd.read_parquet(root / f"data/chunk-000/episode_{args.episode:06d}.parquet")
-    states = np.stack(df["observation.state"].to_numpy()).astype(np.float64)
-    actions = np.stack(df["action"].to_numpy()).astype(np.float64)
+    episode = pd.read_parquet(root / f"data/chunk-000/episode_{args.episode:06d}.parquet")
+    states = np.stack(episode["observation.state"].to_numpy()).astype(np.float64)
+    actions = np.stack(episode["action"].to_numpy()).astype(np.float64)
     prompt = args.prompt or json.loads((root / "meta/tasks.jsonl").read_text().splitlines()[0])["task"]
     videos = {
         key: _frames(root / f"videos/chunk-000/observation.images.{name}/episode_{args.episode:06d}.mp4")
@@ -91,7 +117,6 @@ def main(args: Args) -> None:
 
     ws = ws_client.connect(args.uri, max_size=None, compression=None, open_timeout=30)
     received: list[dict] = []
-    frame_of_send: dict[int, int] = {}
     stop = threading.Event()
     lock = threading.Lock()
     current_frame = [0]
@@ -191,9 +216,11 @@ def _report(args: Args, received: list[dict], actions: np.ndarray, t0: float, se
             + (f"  waist {err[:, 16:21].mean():.4f}" if w >= 21 else "")
         )
         step = np.abs(np.diff(rows[:, :14], axis=0)).max(axis=1)
-        print(f"per-tick arm step rad: p50 {np.percentile(step, 50):.4f}  p99 {np.percentile(step, 99):.4f}  max {step.max():.4f}")
+        print(
+            f"per-tick arm step rad: p50 {np.percentile(step, 50):.4f}  p99 {np.percentile(step, 99):.4f}  max {step.max():.4f}"
+        )
     if args.trace:
-        with open(args.trace, "w") as f:
+        with pathlib.Path(args.trace).open("w") as f:
             for m in received:
                 f.write(json.dumps(m, default=float) + "\n")
         print(f"trace: {args.trace}")

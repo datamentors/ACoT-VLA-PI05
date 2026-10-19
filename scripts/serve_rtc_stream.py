@@ -28,6 +28,8 @@ from openpi.training import config as _config
 
 @dataclasses.dataclass
 class Args:
+    """Command-line arguments for serve_rtc_stream.py (parsed by tyro; nested ``--rtc.*``)."""
+
     # Training config name (e.g. "pi05_g2_ipw_vision_action").
     config: str
     # Checkpoint step directory (contains params/ and assets/).
@@ -42,6 +44,14 @@ class Args:
 
 
 def main(args: Args) -> None:
+    """Load the checkpoint, resolve the waist mode and serve the RTC stream (blocking).
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Raises:
+        SystemExit: If the config is not Pi0/pi0.5 or ``--rtc.waist`` is not a valid mode.
+    """
     train_config = _config.get_config(args.config)
     if not isinstance(train_config.model, pi0.Pi0Config):
         raise SystemExit(

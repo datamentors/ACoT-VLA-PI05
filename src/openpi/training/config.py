@@ -2543,12 +2543,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         log_interval=20,
         resume=True,
-        save_interval=500 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=500 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_fixed_masked: corrected ACTIONS norm_stats.
     #
@@ -2597,12 +2597,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_fixed_waist: corrected ACTIONS norm_stats.
     #
@@ -2651,12 +2651,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_motor_{masked,waist}: pi05_g2_fixed_{masked,waist} on corrected data.
     #
@@ -2706,12 +2706,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     TrainConfig(
         name="pi05_g2_motor_waist",
@@ -2742,12 +2742,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_mixed_waist_control ("MixedWaistControl"): continues pi05_g2_motor_waist
     # (motorwaist_20260925_1012/19999) on the old train split plus two new sessions:
@@ -2788,12 +2788,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_motor_waist/motorwaist_20260925_1012/19999/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_mixed_vision_action ("MixedWaistVision"): continues MixedWaistControl/95000
     # (best val) with the VISION encoder (SigLIP + img/head projector) unfrozen as well as the
@@ -2836,12 +2836,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_mixed_waist_control/MixedWaistControl/95000/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw_vision_action ("InfPoseWaistVision"): ONE embodiment only -- inference pose
     # + headset waist. Trained from the BASE manipulation_pi05 (not a G2 fine-tune).
@@ -2884,12 +2884,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw_vision_action_wsd: identical to pi05_g2_ipw_vision_action except the LR
     # schedule is Warmup-Stable-Decay -- 1k warmup, flat 1e-5 (same peak as the cosine config),
@@ -2925,12 +2925,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw_vision_action_wsd_crop: pi05_g2_ipw_vision_action_wsd + square center crop
     # instead of letterbox (head 640x400 -> central 400x400, hands 1280x1056 -> central
@@ -2967,12 +2967,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw2_vision_action_wsd_crop: pi05_g2_ipw_vision_action_wsd_crop (fork commits 330cd2a + d0b7bef:
     # WSD 1e-5 -> 1e-6 over the last 10k + square center crop) on the ipw dataset v2 = the 5 ipw sessions +
@@ -3013,12 +3013,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw3_vision_action_wsd_crop_ft99k: pi05_g2_ipw2_vision_action_wsd_crop (same model, freeze, LR/WSD, crop,
     # bs, steps) fine-tuned FROM InfPoseWaistVisionWsdCrop/99999 on the ipw3 dataset = ipw2 split unchanged + headset
@@ -3064,12 +3064,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_ipw2_vision_action_wsd_crop/InfPoseWaistVisionWsdCrop/99999/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw4_vision_action_wsd_crop_ft: pi05_g2_ipw3_vision_action_wsd_crop_ft99k (same model, freeze, LR/WSD, crop,
     # bs, steps) as a NEW run (not resume) FROM InfPoseWaistVisionWsdCropFt99k/99999 on ipw4 = ipw3 split unchanged +
@@ -3116,12 +3116,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_ipw3_vision_action_wsd_crop_ft99k/InfPoseWaistVisionWsdCropFt99k/99999/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=100_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # pi05_g2_ipw4_vision_action_wsd_crop_ft3: pi05_g2_ipw4_vision_action_wsd_crop_ft (same ipw4 data + stats, model,
     # freeze, crop, bs, peak/end LR) as a NEW 50k-step WSD cycle (1k warmup, flat 1e-5, sqrt decay to 1e-6 over the
@@ -3167,12 +3167,12 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ACoT-VLA/checkpoints/pi05_g2_ipw4_vision_action_wsd_crop_ft/InfPoseWaistVisionWsdCropFt2/98000/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=50_000,
         log_interval=20,
         resume=True,
-        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from
@@ -3210,15 +3210,15 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         log_interval=20,
         resume=True,
         # 500 rather than 2000: far more checkpoints to pick from, and each one
         # is much smaller here because only the action expert carries optimizer
         # state.
-        save_interval=500 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=500 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from
@@ -3262,13 +3262,13 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
         ),
-        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
-        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
         num_train_steps=20_000,
         # log often so TensorBoard shows curves within minutes of launch
         log_interval=20,
         resume=True,
-        save_interval=500 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+        save_interval=500 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
     # acot genie sim instruction and robust
     TrainConfig(

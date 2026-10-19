@@ -39,6 +39,7 @@ import dataclasses
 import json
 import logging
 import os
+import pathlib
 import queue
 import threading
 import time
@@ -51,6 +52,14 @@ log = logging.getLogger("rtc_stream_policy")
 
 @dataclasses.dataclass
 class StreamConfig:
+    """Client settings, set once by run_rtc_stream.py through the module-level ``CFG``.
+
+    Attributes:
+        pace_hz: Wall-clock act() rate, Hz; 0 = run as fast as the sim goes.
+        trace: JSONL path, one line per act(); empty = off.
+        pipeline: Send without waiting for each reply; apply the newest command received.
+    """
+
     pace_hz: float = 30.0  # wall-clock act() rate; 0 = run as fast as the sim goes
     trace: str = ""  # jsonl, one line per act()
     pipeline: bool = False  # send without waiting; apply the newest command received
@@ -60,11 +69,24 @@ CFG = StreamConfig()
 
 
 def build(CoRobotPolicy):
-    """Subclass the benchmark's CoRobotPolicy (importable only after SimulationApp boots)."""
+    """Subclass the benchmark's CoRobotPolicy (importable only after SimulationApp boots).
+
+    Args:
+        CoRobotPolicy: The benchmark's ``CoRobotPolicy`` class.
+
+    Returns:
+        ``RtcStreamPolicy``, a CoRobotPolicy subclass bound to the current ``CFG``.
+    """
     from geniesim_benchmark.utils.comm.retry import get_recv_timeout
     from geniesim_benchmark.utils.infer_post_process import get_arm_states
 
-    class RtcStreamPolicy(CoRobotPolicy):  # noqa: F821
+    class RtcStreamPolicy(CoRobotPolicy):
+        """CoRobotPolicy whose act() is one tick of the server-owned RTC stream.
+
+        Called from the sim thread only; pipeline mode adds a sender and a receiver
+        thread that share state through ``_rx_lock``.
+        """
+
         cfg: StreamConfig = CFG
 
         def __init__(self, *args, **kwargs) -> None:
@@ -89,12 +111,15 @@ def build(CoRobotPolicy):
 
         # -- benchmark hooks ------------------------------------------------------
         def need_infer(self):
+            """Return True: render every step, the server needs a fresh observation each tick."""
             return True  # render every step: the server needs a fresh observation each tick
 
         def inference_due(self):
+            """Return False: never settle-wait, the server decides when to infer."""
             return False  # never settle-wait; the server decides when to infer
 
         def reset(self):
+            """Start a new episode; the next act() sends "reset" to the server first."""
             super().reset()
             if self._step:
                 log.info("episode %d done: %s", self._episode, dict(self._counts))
@@ -117,6 +142,19 @@ def build(CoRobotPolicy):
             return reply
 
         def act(self, observation, **kwargs):
+            """Run one control tick: send the observation and apply the server's command.
+
+            Paced to ``cfg.pace_hz`` wall clock. Without a command this tick (readiness,
+            latch, error) the last target is held, or the current arm state before any.
+
+            Args:
+                observation: Genie Sim observation dict (``states``, images, ...).
+                **kwargs: Benchmark extras; ``task_instruction`` and ``gen_config`` are used.
+
+            Returns:
+                The post-processed JOINT_ABS action dict, the held one, or None when the
+                lock-step payload could not be built.
+            """
             if self.cfg.pace_hz > 0:
                 wait = self._last_act_t + 1.0 / self.cfg.pace_hz - time.monotonic()
                 if wait > 0:
@@ -170,7 +208,7 @@ def build(CoRobotPolicy):
                     if not rearm.get("rearm_ok"):
                         log.warning("rearm refused: %s", rearm.get("rearm_reason"))
                 return reply
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # A new connection starts a fresh server session; reset on the next tick too.
                 self._counts["errors"] += 1
                 log.warning("RTC stream error: %s: %s", type(exc).__name__, exc)
@@ -190,7 +228,7 @@ def build(CoRobotPolicy):
                         raw = ws.recv(timeout=0.5)
                     except TimeoutError:
                         continue
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         self._rx_error = exc
                         return
                     msg = {"type": "error", "error": raw} if isinstance(raw, str) else msgpack.unpackb(raw, raw=False)
@@ -246,7 +284,7 @@ def build(CoRobotPolicy):
                             ws.send(msgpack.packb({"type": "obs", "params": payload["params"], "tick": True}))
                         else:
                             ws.send(msgpack.packb({"type": item[0]}))
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         self._rx_error = exc
                         return
 
@@ -292,7 +330,7 @@ def build(CoRobotPolicy):
                         continue
                     try:
                         obs[key] = copy.deepcopy(value)
-                    except Exception:  # noqa: BLE001 - uncopyable sim handles stay shared
+                    except Exception:  # uncopyable sim handles stay shared
                         obs[key] = value
                 self._enqueue(("obs", obs, instruction, gen_config))
                 with self._rx_lock:
@@ -304,7 +342,7 @@ def build(CoRobotPolicy):
                     log.warning("server latched: %s; rearming", status.get("reason"))
                     self._enqueue(("rearm",))
                 return cmd if cmd is not None else status
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._counts["errors"] += 1
                 log.warning("RTC stream error: %s: %s", type(exc).__name__, exc)
                 self._drop_connection()
@@ -329,7 +367,7 @@ def build(CoRobotPolicy):
                 "row": None if row is None else row.tolist(),
             }
             try:
-                with open(self.cfg.trace, "a") as f:
+                with pathlib.Path(self.cfg.trace).open("a") as f:
                     f.write(json.dumps(record) + "\n")
             except OSError as exc:
                 log.debug("trace write failed: %s", exc)

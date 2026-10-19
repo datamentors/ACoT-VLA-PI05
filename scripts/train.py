@@ -57,6 +57,11 @@ _tb_writer = None
 
 
 def init_tensorboard(config: _config.TrainConfig):
+    """Open a TensorBoard writer at ``<checkpoint_dir>/tb``; no-op if tensorboardX is missing.
+
+    Args:
+        config: Training config; only ``checkpoint_dir`` is used.
+    """
     global _tb_writer
     try:
         from tensorboardX import SummaryWriter
@@ -70,6 +75,12 @@ def init_tensorboard(config: _config.TrainConfig):
 
 
 def tb_log(metrics: dict, step: int):
+    """Write each metric as a TensorBoard scalar and flush; log and swallow any write error.
+
+    Args:
+        metrics: Metric name -> value convertible with ``float``.
+        step: TensorBoard global step.
+    """
     if _tb_writer is None:
         return
     try:
@@ -92,6 +103,13 @@ _val_relayed: set[int] = set()
 
 
 def init_val_relay(resuming: bool = False):
+    """Enable the validation relay from ``$VAL_METRICS_JSONL``; no-op when it is unset.
+
+    Registers ``val_actions/*`` against ``val_actions/checkpoint_step`` in wandb.
+
+    Args:
+        resuming: When True and the file exists, skip every byte already in it.
+    """
     global _val_path, _val_offset
     path = os.getenv("VAL_METRICS_JSONL")
     if not path:
@@ -112,6 +130,11 @@ def relay_val_metrics(step: int) -> None:
 
     One per call: two records logged at the same wandb step would overwrite each other.
     A trailing partial line (validator mid-write) is left for the next call.
+    Any error is logged and swallowed.
+
+    Args:
+        step: wandb step to log the record at. TensorBoard gets it at the record's
+            ``val_actions/checkpoint_step`` instead.
     """
     global _val_offset
     if _val_path is None or not _val_path.exists():
@@ -141,7 +164,16 @@ def relay_val_metrics(step: int) -> None:
 
 
 def drain_val_metrics(final_step: int, last_logged_step: int) -> None:
-    """After training: wait for the final checkpoint's validation, relaying anything pending."""
+    """After training: wait for the final checkpoint's validation, relaying anything pending.
+
+    Polls every 30 s, for at most ``$VAL_FINAL_WAIT_S`` seconds (default 1800) of polls
+    that find no new record. Each relayed record gets the next wandb step after
+    ``last_logged_step``.
+
+    Args:
+        final_step: Checkpoint step whose validation record ends the wait.
+        last_logged_step: Last wandb step used by the training loop.
+    """
     if _val_path is None:
         return
     timeout_s = float(os.getenv("VAL_FINAL_WAIT_S", "1800"))
@@ -256,6 +288,7 @@ _PARAM_GROUPS = {
 
 
 def _f32_norm(tree) -> at.Array:
+    """Return the global L2 norm of all leaves, accumulated in float32 (0.0 for an empty tree)."""
     # Frozen groups are stored in bfloat16 (see init_train_state); square-and-sum per leaf in
     # float32 so the norm is exact and always a float32 scalar (XLA fuses the cast per leaf).
     leaves = jax.tree.leaves(tree)
@@ -265,6 +298,15 @@ def _f32_norm(tree) -> at.Array:
 
 
 def _group_norms(tree: nnx.State, prefix: str) -> dict[str, at.Array]:
+    """Compute the L2 norm of each ``_PARAM_GROUPS`` subset of ``tree``, plus the rest.
+
+    Args:
+        tree: Params or grads state.
+        prefix: Metric prefix, e.g. ``"grad_norm"``.
+
+    Returns:
+        ``{f"{prefix}/{group}": norm}`` for vision, llm, action_expert and other.
+    """
     out = {f"{prefix}/{name}": _f32_norm(tree.filter(f)) for name, f in _PARAM_GROUPS.items()}
     out[f"{prefix}/other"] = _f32_norm(tree.filter(nnx.Not(nnx.Any(*_PARAM_GROUPS.values()))))
     return out

@@ -40,6 +40,18 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         fresh_noise: bool = False,
     ):
+        """Wrap a model with input/output transforms and a jitted sampler.
+
+        Args:
+            model: Model whose ``sample_actions`` is jitted.
+            rng: PRNG key for diffusion noise; defaults to ``jax.random.key(0)``.
+            transforms: Input transforms applied to each observation.
+            output_transforms: Output transforms applied to each model result.
+            sample_kwargs: Extra keyword arguments passed to ``sample_actions``.
+            metadata: Policy metadata.
+            fresh_noise: If True, split the key on every call (new noise per chunk). If False, reuse one fixed key so
+                identical payloads give identical outputs.
+        """
         # The RTC prefix schedule is a Python string, so it must be static under jit.
         self._sample_actions = nnx_utils.module_jit(
             model.sample_actions, static_argnames=("rtc_prefix_attention_schedule",)
@@ -79,6 +91,22 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict) -> dict:  # type: ignore[misc]
+        """Run one inference, optionally with RTC guidance.
+
+        Args:
+            obs: Unbatched observation. May carry an RTC request under ``"_rtc"``, a dict with:
+                ``prev_actions``: [rows, dims] absolute leftover in the policy's output layout, or None/empty
+                (no guidance, same compiled graph); ``inference_delay``: int, default 0; ``execution_horizon``:
+                int, default 10, clamped to [1, action_horizon]; ``max_guidance_weight``: float, default 10.0;
+                ``prefix_attention_schedule``: optional str (static under jit; each new value recompiles).
+
+        Returns:
+            Post-processed outputs with "actions", "state" and "policy_timing", plus "rtc"
+            (``inference_delay``, ``execution_horizon``, ``prev_rows``) when an RTC request was given.
+
+        Raises:
+            ValueError: If ``_rtc["prev_actions"]`` is not 2D.
+        """
         # Make a copy since transformations may modify the inputs in place.
         rtc = obs.get(_RTC_OPTIONS_KEY)
         inputs = jax.tree.map(lambda x: x, {k: v for k, v in obs.items() if k != _RTC_OPTIONS_KEY})

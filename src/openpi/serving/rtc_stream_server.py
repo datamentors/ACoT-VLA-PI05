@@ -51,6 +51,7 @@ import dataclasses
 import json
 import logging
 import math
+import pathlib
 import threading
 import time
 import traceback
@@ -157,14 +158,24 @@ class _Assessment:
 
 
 class ActionQueue:
-    """LeRobot ActionQueue in RTC mode over absolute rows: merge replaces, never appends."""
+    """LeRobot ActionQueue in RTC mode over absolute rows: merge replaces, never appends.
+
+    Every method takes the queue's own lock, so it is safe to call from the clock and
+    the inference threads at once.
+    """
 
     def __init__(self) -> None:
+        """Create an empty queue (no rows, index 0)."""
         self._lock = threading.Lock()
         self._rows: np.ndarray | None = None
         self._index = 0
 
     def get(self) -> np.ndarray | None:
+        """Pop the next row.
+
+        Returns:
+            A copy of the next unexecuted row, shape [W] float64, or None when empty.
+        """
         with self._lock:
             if self._rows is None or self._index >= len(self._rows):
                 return None
@@ -173,11 +184,17 @@ class ActionQueue:
             return row
 
     def qsize(self) -> int:
+        """Return the number of unexecuted rows (steps) left in the queue."""
         with self._lock:
             return 0 if self._rows is None else len(self._rows) - self._index
 
     def snapshot(self) -> tuple[int, int, np.ndarray | None]:
-        """Coherent (depth, index, leftover rows) under one lock."""
+        """Read depth, index and leftover rows coherently under one lock.
+
+        Returns:
+            ``(depth, index, leftover)``: unexecuted row count, rows popped since the last
+            merge, and a copy of the unexecuted rows [depth, W] (None before any merge).
+        """
         with self._lock:
             if self._rows is None:
                 return 0, self._index, None
@@ -185,6 +202,15 @@ class ActionQueue:
             return len(leftover), self._index, leftover
 
     def merge(self, rows: np.ndarray, delay: int) -> int:
+        """Replace the queue with ``rows[delay:]`` and reset the index to 0.
+
+        Args:
+            rows: New chunk of absolute rows, shape [T, W].
+            delay: Leading rows to skip (already executed in wall time); clamped to [0, T].
+
+        Returns:
+            The new queue depth, ``T - delay``.
+        """
         with self._lock:
             delay = min(max(0, delay), len(rows))
             self._rows = np.array(rows[delay:], dtype=np.float64)
@@ -195,7 +221,19 @@ class ActionQueue:
 def inference_delay_steps(
     guided_latencies_s: tuple[float, ...], tracked_max_latency_s: float, control_hz: float, fallback: int
 ) -> int:
-    """Anvil: the guided window once it exists, else the all-time max, else the fallback."""
+    """Return the RTC inference delay in rows (Anvil).
+
+    Uses the guided latency window once it exists, else the all-time max, else the fallback.
+
+    Args:
+        guided_latencies_s: Recent guided-refill latencies, seconds.
+        tracked_max_latency_s: All-time max latency, seconds (0 = none measured).
+        control_hz: Row rate, rows per second.
+        fallback: Delay in rows when no latency has been measured.
+
+    Returns:
+        ``ceil(latency * control_hz)`` rows, or ``fallback``.
+    """
     if guided_latencies_s:
         return math.ceil(max(guided_latencies_s) * control_hz)
     if tracked_max_latency_s > 0:
@@ -217,8 +255,33 @@ def resolve_merge_alignment(
     index_phase_tolerance_steps: int,
     allow_empty_queue: bool = False,
 ) -> _Alignment:
-    """Anvil ``_resolve_rtc_merge_alignment``: real consumption is the merge delay once
-    publishing; before readiness nothing may be consumed and the wall delay is used."""
+    """Resolve the merge delay for a finished refill (Anvil ``_resolve_rtc_merge_alignment``).
+
+    Once publishing, the rows really consumed during inference are the merge delay;
+    before readiness nothing may be consumed and the wall-clock delay is used instead.
+    Times are in engine seconds (see ``RtcEngine._now``); step counts are rows.
+
+    Args:
+        queue_identity_matches: Whether the queue at merge is the one captured at dispatch.
+        queue_size_before: Queue depth (rows) at dispatch.
+        queue_size_at_merge: Queue depth (rows) at merge.
+        index_before: Queue index at dispatch.
+        index_at_merge: Queue index at merge.
+        requested_t: Dispatch time, seconds.
+        merge_t: Merge time, seconds.
+        control_hz: Row rate, rows per second.
+        policy_ready: Whether publication is open (POLICY_READY).
+        index_phase_tolerance_steps: Rows of consumption allowed beyond the wall-clock bound.
+        allow_empty_queue: Accept a queue that ran dry before the merge (readiness gate off).
+
+    Returns:
+        The runtime, wall delay, consumed rows, merge delay and merge time.
+
+    Raises:
+        ValueError: On invalid timing, a replaced queue, regressed or inconsistent
+            depth/index, pre-ready consumption, an emptied queue, or consumption above
+            the wall-clock bound.
+    """
     if not math.isfinite(requested_t) or not math.isfinite(merge_t) or merge_t < requested_t:
         raise ValueError("RTC merge alignment has invalid timing")
     if not queue_identity_matches:
@@ -267,7 +330,27 @@ def assess_readiness(
     scheduler_guard_steps: int,
     min_guided_overlap_steps: int,
 ) -> _Assessment:
-    """Anvil ``_assess_rtc_readiness``: can this chunk survive the next refill?"""
+    """Decide whether a merged chunk can survive the next refill (Anvil ``_assess_rtc_readiness``).
+
+    Args:
+        chunk_size: Rows in the new chunk (model action horizon).
+        candidate_delay_steps: Merge delay of this chunk, rows.
+        guided_latencies_s: Guided latencies including this one, seconds; must be non-empty.
+        control_hz: Row rate, rows per second.
+        queue_threshold: Queue depth (rows) at or below which the worker re-infers.
+        source_age_s: Age of the chunk's observation at merge, seconds.
+        max_action_age_s: Limit on a published row's source age, seconds.
+        execution_horizon: Guided prefix length H, rows.
+        latency_guard_steps: Rows added to the latency bound.
+        scheduler_guard_steps: Rows allowed for worker scheduling slack.
+        min_guided_overlap_steps: Minimum guided rows beyond the delay bound.
+
+    Returns:
+        The verdict, the failure reasons, and the margins it was computed from.
+
+    Raises:
+        ValueError: If ``guided_latencies_s`` is empty.
+    """
     if not guided_latencies_s:
         raise ValueError("RTC readiness requires guided latency samples")
     q_start = max(0, chunk_size - candidate_delay_steps)
@@ -297,9 +380,22 @@ class RtcEngine:
 
     ``_safety_lock`` is always taken first; the queue's own lock is taken inside it.
     The model runs outside ``_safety_lock`` so ``tick`` never waits on the GPU.
+    All public methods are thread-safe.
     """
 
     def __init__(self, policy: _policy.Policy, cfg: RtcStreamConfig, *, waist: str) -> None:
+        """Compile the model and start the inference worker thread.
+
+        Blocks for the JIT compile (seconds) before returning.
+
+        Args:
+            policy: Pi0/pi0.5 policy whose ``infer`` accepts the ``_rtc`` options block.
+            cfg: RTC and safety settings.
+            waist: Resolved waist mode: "model", "hold" or "off" ("auto" is not accepted).
+
+        Raises:
+            ValueError: If ``cfg.clock`` or ``waist`` is not a supported value.
+        """
         if cfg.clock not in ("wall", "external"):
             raise ValueError(f"clock must be 'wall' or 'external', got {cfg.clock!r}")
         self._policy = policy
@@ -309,7 +405,7 @@ class RtcEngine:
         self._waist = waist
         self._safety_lock = threading.RLock()
         self._stop = threading.Event()
-        self._trace = open(cfg.trace, "a") if cfg.trace else None  # noqa: SIM115
+        self._trace = pathlib.Path(cfg.trace).open("a") if cfg.trace else None  # noqa: SIM115
 
         self._queue = ActionQueue()
         self._epoch = 0
@@ -366,6 +462,7 @@ class RtcEngine:
     # -- session / safety ---------------------------------------------------------------
 
     def start_session(self) -> None:
+        """Begin a client session: new epoch, empty queue, cleared latch, startup grace restarts."""
         with self._safety_lock:
             self._invalidate_locked()
             self._session = True
@@ -377,13 +474,21 @@ class RtcEngine:
             logger.info("[RTC] session started epoch=%d", self._epoch)
 
     def end_session(self) -> None:
+        """End the client session, latching with "client disconnected" unless already latched."""
         with self._safety_lock:
             if self._session and not self._latched:
                 self._trip_locked("client disconnected")
             self._session = False
 
     def rearm(self) -> tuple[bool, str]:
-        """Anvil rearm: inputs must be healthy and have advanced past the fault."""
+        """Leave LATCHED and restart the readiness proof (Anvil rearm).
+
+        Inputs must be fresh (within ``max_obs_age_s``) and include an observation newer
+        than the one current at the fault.
+
+        Returns:
+            ``(ok, reason)``; ``reason`` is empty on success.
+        """
         with self._safety_lock:
             if not self._latched:
                 return False, "not latched"
@@ -401,8 +506,11 @@ class RtcEngine:
             return True, ""
 
     def reset(self) -> None:
-        """New episode on the same connection: drop every action, re-run the startup
-        grace and the whole readiness proof (Anvil rearm + model.reset, without a fault)."""
+        """Start a new episode on the same connection.
+
+        Drops every action and the last observation, re-runs the startup grace and the
+        whole readiness proof (Anvil rearm + model.reset, without a fault). Also clears a latch.
+        """
         with self._safety_lock:
             self._invalidate_locked()
             # Drop the previous episode's last frame: with clock="external" it still looks
@@ -416,12 +524,19 @@ class RtcEngine:
             logger.info("[RTC] RESET epoch=%d; readiness proof restarts", self._epoch)
 
     def close(self) -> None:
+        """Stop the worker thread (waits up to 5 s) and close the trace file."""
         self._stop.set()
         self._worker.join(timeout=5.0)
         if self._trace:
             self._trace.close()
 
     def status(self) -> dict:
+        """Return the wire status message.
+
+        Returns:
+            ``{"type": "status", "state", "reason", "epoch"}`` with state one of
+            "latched", "ready", "armed", "starting" (checked in that order).
+        """
         with self._safety_lock:
             if self._latched:
                 state = "latched"
@@ -485,12 +600,24 @@ class RtcEngine:
         return time.monotonic()
 
     def accept_observation(self, obs: dict) -> None:
+        """Store ``obs`` as the latest observation, stamped with a new seq and engine time.
+
+        Args:
+            obs: Policy input dict (``state``, ``images``, ``prompt``) from the corobot params.
+        """
         with self._safety_lock:
             self._obs_seq += 1
             self._obs = _Observation(obs, self._obs_seq, self._now())
 
     def tick(self) -> dict | None:
-        """One control step: pop, authorize and return one command, or None."""
+        """Advance one control step: pop, authorize and return one command.
+
+        Always advances the tick counter (the engine clock when clock="external"). May latch
+        on stale inputs, an empty queue after POLICY_READY (gate on) or an over-age row.
+
+        Returns:
+            The wire ``cmd`` message, or None when not ready, latched or no row is due.
+        """
         with self._safety_lock:
             self._ticks += 1
             now = self._now()
@@ -586,7 +713,9 @@ class RtcEngine:
         self._guided_streak = 0
         self._guided_latencies.clear()
 
-    def _merge_locked(self, rows: np.ndarray, dispatch: _Dispatch, obs_t: float) -> tuple[int, _Alignment, float | None]:
+    def _merge_locked(
+        self, rows: np.ndarray, dispatch: _Dispatch, obs_t: float
+    ) -> tuple[int, _Alignment, float | None]:
         """Validate alignment and merge atomically against the captured queue."""
         merge_t = self._now()
         queue_size, index, _ = self._queue.snapshot()
@@ -693,9 +822,13 @@ class RtcEngine:
             self._max_latency = max(self._max_latency, alignment.runtime_s)
             logger.info(
                 "[RTC] SEED_PROVISIONAL epoch=%d latency=%.1fms queue=%d; publication remains closed",
-                epoch, alignment.runtime_s * 1000.0, queue_size,
+                epoch,
+                alignment.runtime_s * 1000.0,
+                queue_size,
             )
-            self._write_trace({**trace, "phase": "seed", "merge_delay": alignment.merge_delay_steps, "queue": queue_size})
+            self._write_trace(
+                {**trace, "phase": "seed", "merge_delay": alignment.merge_delay_steps, "queue": queue_size}
+            )
             return
 
         if not self._seeded:
@@ -768,7 +901,9 @@ class RtcEngine:
             self._reset_streak_locked()
             logger.warning(
                 "[RTC] READINESS_REJECTED epoch=%d: %s; %s; streak reset",
-                epoch, "; ".join(assessment.failures), assessment.fields(),
+                epoch,
+                "; ".join(assessment.failures),
+                assessment.fields(),
             )
             return
 
@@ -778,12 +913,18 @@ class RtcEngine:
             if self._guided_streak < READINESS_GUIDED_FORWARDS:
                 logger.info(
                     "[RTC] READINESS_PROGRESS epoch=%d guided=%d/%d %s",
-                    epoch, self._guided_streak, READINESS_GUIDED_FORWARDS, assessment.fields(),
+                    epoch,
+                    self._guided_streak,
+                    READINESS_GUIDED_FORWARDS,
+                    assessment.fields(),
                 )
                 return
             self._ready = True
             logger.info(
-                "[RTC] POLICY_READY epoch=%d latency=%.1fms %s", epoch, alignment.runtime_s * 1000.0, assessment.fields()
+                "[RTC] POLICY_READY epoch=%d latency=%.1fms %s",
+                epoch,
+                alignment.runtime_s * 1000.0,
+                assessment.fields(),
             )
 
     def _commit_ungated_locked(
@@ -837,6 +978,14 @@ class RtcStreamServer:
     """Websocket front end: one client streams observations, the engine streams commands."""
 
     def __init__(self, engine: RtcEngine, cfg: RtcStreamConfig, host: str = "0.0.0.0", port: int = 8000) -> None:
+        """Bind the server settings; nothing listens until ``serve_forever``.
+
+        Args:
+            engine: The RTC engine that owns the queue and the inference worker.
+            cfg: Same config the engine was built with (``clock``, ``control_hz``).
+            host: Interface to listen on.
+            port: TCP port to listen on.
+        """
         self._engine = engine
         self._cfg = cfg
         self._host = host
@@ -844,6 +993,7 @@ class RtcStreamServer:
         self._busy = False
 
     def serve_forever(self) -> None:
+        """Run the websocket server until interrupted, then close the engine (blocking)."""
         try:
             asyncio.run(self._run())
         finally:
@@ -916,7 +1066,9 @@ class RtcStreamServer:
                     await websocket.send(msgpack_numpy.packb(reply))
             elif kind == "rearm":
                 ok, reason = self._engine.rearm()
-                await websocket.send(msgpack_numpy.packb({**self._engine.status(), "rearm_ok": ok, "rearm_reason": reason}))
+                await websocket.send(
+                    msgpack_numpy.packb({**self._engine.status(), "rearm_ok": ok, "rearm_reason": reason})
+                )
             elif kind == "reset":
                 self._engine.reset()
                 await websocket.send(msgpack_numpy.packb({**self._engine.status(), "reset_ok": True}))

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pathlib
 import runpy
 import sys
 
@@ -30,16 +31,25 @@ def _split_argv(argv):
 
 
 def build_parser():
+    """Build the parser for the stream flags (the arguments before ``--``).
+
+    Returns:
+        The argparse parser for --pace-hz, --trace, --pipeline and --log-level.
+    """
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pace-hz", type=float, default=30.0, help="wall-clock act() rate; 0 = unpaced")
     p.add_argument("--trace", default="")
-    p.add_argument("--pipeline", action="store_true",
-                   help="send observations without waiting for each reply (sim steps at its own rate)")
+    p.add_argument(
+        "--pipeline",
+        action="store_true",
+        help="send observations without waiting for each reply (sim steps at its own rate)",
+    )
     p.add_argument("--log-level", default="INFO")
     return p
 
 
 def main():
+    """Configure the stream client, patch CoRobotPolicy on import, and run app.py in-process."""
     mine, theirs = _split_argv(sys.argv[1:])
     a = build_parser().parse_args(mine)
 
@@ -89,10 +99,10 @@ def main():
 
     import geniesim_benchmark  # app.py boots SimulationApp at import: locate it, don't import it
 
-    app_py = os.path.join(os.path.dirname(geniesim_benchmark.__file__), "app", "app.py")
+    app_py = str(pathlib.Path(geniesim_benchmark.__file__).parent / "app" / "app.py")
     print(f"[run_rtc_stream] cfg: {rtc_stream_policy.CFG}", flush=True)
     print(f"[run_rtc_stream] launching {app_py} {' '.join(theirs)}", flush=True)
-    sys.argv = [app_py] + theirs
+    sys.argv = [app_py, *theirs]
     runpy.run_path(app_py, run_name="__main__")
 
 
