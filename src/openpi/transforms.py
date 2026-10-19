@@ -203,6 +203,33 @@ class ResizeImages(DataTransformFn):
         data[self.key] = {k: image_tools.resize_with_pad(self.to_numpy(v), self.height, self.width) for k, v in data[self.key].items()}
         return data
 
+
+@dataclasses.dataclass(frozen=True)
+class CenterCropResizeImages(ResizeImages):
+    """Center-crop each [..., h, w, c] image to the target aspect ratio, then resize. No black padding.
+
+    For 224x224 this keeps the central square (640x400 -> 400x400), so the sides of wide frames are dropped.
+    """
+
+    def __call__(self, data: DataDict) -> DataDict:
+        data[self.key] = {
+            k: image_tools.resize_with_pad(self._center_crop(self.to_numpy(v)), self.height, self.width)
+            for k, v in data[self.key].items()
+        }
+        return data
+
+    def _center_crop(self, image: np.ndarray) -> np.ndarray:
+        h, w = image.shape[-3:-1]
+        target = self.width / self.height
+        if w / h > target:
+            new_w = round(h * target)
+            left = (w - new_w) // 2
+            return image[..., :, left : left + new_w, :]
+        new_h = round(w / target)
+        top = (h - new_h) // 2
+        return image[..., top : top + new_h, :, :]
+
+
 @dataclasses.dataclass(frozen=True)
 class SubsampleActions(DataTransformFn):
     stride: int
