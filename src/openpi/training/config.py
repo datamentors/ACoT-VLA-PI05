@@ -99,6 +99,10 @@ class DataConfig:
 
     dataloader_sampler: str | None = ''
 
+    # Train (and validate_actions) only on frames whose LeRobot task text is one of these (exact match,
+    # whitespace-stripped). For v2.1 exports that store each sub-task as its own task, e.g. LOOP. Empty = all frames.
+    subtask_include: Sequence[str] = ()
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -3173,6 +3177,108 @@ _CONFIGS = [
         log_interval=20,
         resume=True,
         save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
+    ),
+    # pi05_g2_loop_pick_place_ft: sub-task fine-tune on the LOOP-annotated g2a0004-infpose-headset export (NAS,
+    # LeRobot v2.1, each sub-task written as its own task). Trains ONLY on frames labelled "Pick a towel from a bin."
+    # or "Place towel on the table." (subtask_include -> sampler.sample_tasks); every other frame is skipped, no copy.
+    # Prompt = the frame's sub-task text (prompt_from_task). Same model/freeze/crop/stats as ft3, from Ft2 best 98000
+    # (NAS archive). Sessions = those with LOOP labels on 2026-10-30; 2026-10-01/s02 is held out for validation
+    # (validate_actions --val-repo-id .../2026-10-01/s02, which applies the same filter).
+    TrainConfig(
+        name="pi05_g2_loop_pick_place_ft",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-09-24/s01",
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-09-25/s02",
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-09-28/s01",
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-10-01/s01",
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-10-02/s02",
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-10-19/s01",
+                "/mnt/Datasets/processed/cloth_folding/fold_towel/agibot_g2/g2a0004-infpose-headset/2026-10-20/s01",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_ipw4_train/pi05_g2_ipw4_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            center_crop_images=True,
+            base_config=DataConfig(
+                prompt_from_task=True,
+                subtask_include=("Pick a towel from a bin.", "Place towel on the table."),
+            ),
+        ),
+        lr_schedule=_optimizer.WSDSchedule(
+            warmup_steps=1_000, peak_lr=1e-5, total_steps=20_000, decay_steps=5_000, end_lr=1e-6, decay_type="sqrt",
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/mnt/trained-models/SesaramHospitalityLaundry/g2-checkpoints/"
+            "2026-10-14_pi05_fold-towel_InfPoseWaistVisionWsdCropFt2_100k/checkpoints/best_step098000/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=20_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
+    ),
+    # pi05_g2_loop_pick_ft: ONLY "Pick a towel from a bin." (subtask_include), on the final LOOP labels (2026-10-30
+    # 17:13Z) copied to AMAX data_to_train (~/g2sim/copy_loop_sessions.sh). Recipe = pi05_g2_ipw2_vision_action_wsd_crop
+    # (WaistVisionAction + WSD + center crop: same model, freeze, transforms, bs, warmup/peak/10k decay/end LR) FROM the base
+    # manipulation_pi05 weights. Norm stats recomputed on all frames of these 10 train sessions (convert/compute_stats.py,
+    # as for ipw2/ipw3). Sessions with >=2 labelled pick episodes; 2026-10-06/s01, 10-16/s01, 10-19/s01 skipped (1 pick
+    # episode each, 873 frames, 21 GB video). 2026-10-01/s02 held out for validation. ~82.6k train frames.
+    # 60k steps (not 100k) so it ends before Mon 2026-11-02 10:00: Ft3 ran 3.54 s/step on GPUs 0,1 -> ~59 h.
+    TrainConfig(
+        name="pi05_g2_loop_pick_ft",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-09-24/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-09-25/s02",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-09-28/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-01/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-02/s02",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-07/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-08/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-08/s02",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-12/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-20/s01",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_loop_pick_train/pi05_g2_loop_pick_train/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            center_crop_images=True,
+            base_config=DataConfig(prompt_from_task=True, subtask_include=("Pick a towel from a bin.",)),
+        ),
+        lr_schedule=_optimizer.WSDSchedule(
+            warmup_steps=1_000, peak_lr=1e-5, total_steps=60_000, decay_steps=10_000, end_lr=1e-6, decay_type="sqrt",
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
+        ),
+        num_workers=8 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        batch_size=16 if not os.getenv("DEBUG_MODE", default=False) == "true" else 2,
+        num_train_steps=60_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if not os.getenv("DEBUG_MODE", default=False) == "true" else 100,
     ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from

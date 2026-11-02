@@ -1,4 +1,9 @@
 
+import collections
+import logging
+from collections.abc import Sequence
+
+import numpy as np
 import torch
 import random
 from tqdm import tqdm
@@ -64,11 +69,53 @@ def sample_subtask(dataset):
     return valid_intervals
 
 
+def sample_tasks(dataset, task_include: Sequence[str]) -> list[int]:
+    """Global indices of the frames whose LeRobot task text is one of task_include.
+
+    For LeRobot v2.1 exports that write each sub-task as its own task (e.g. LOOP): the per-frame
+    task_index is then the sub-task label. Matched by text, not index, because every dataset in a
+    MultiLeRobot list numbers its tasks.jsonl independently. Global indices follow the same
+    child-after-child layout as TransformedDataset.
+    """
+    wanted = {t.strip() for t in task_include}
+    base_ds = get_base_dataset(dataset)
+    if isinstance(base_ds, lerobot_dataset.MultiLeRobotDataset):
+        sub_datasets = list(base_ds._datasets)
+    else:
+        sub_datasets = [dataset]
+
+    indices: list[int] = []
+    frames_per_task: collections.Counter = collections.Counter()
+    offset = 0
+    for sub_ds in sub_datasets:
+        inner_ds = get_base_dataset(sub_ds)
+        hits = {i: t.strip() for i, t in inner_ds.meta.tasks.items() if t.strip() in wanted}
+        if hits:
+            task_index = inner_ds.hf_dataset.data.column("task_index").to_numpy().reshape(-1)
+            if len(task_index) != len(sub_ds):
+                raise ValueError(f"{inner_ds.root}: task_index has {len(task_index)} rows, dataset has {len(sub_ds)}")
+            local = np.flatnonzero(np.isin(task_index, list(hits)))
+            indices.extend((local + offset).tolist())
+            counts = {t: int(np.sum(task_index == i)) for i, t in hits.items()}
+            frames_per_task.update(counts)
+            logging.info("subtask filter: %s -> %d / %d frames %s", inner_ds.root, len(local), len(sub_ds), counts)
+        else:
+            logging.info("subtask filter: %s -> 0 / %d frames (no matching task)", inner_ds.root, len(sub_ds))
+        offset += len(sub_ds)
+
+    missing = sorted(wanted - {t for t, n in frames_per_task.items() if n > 0})
+    if missing:
+        raise ValueError(f"subtask_include entries matched no frames in any dataset: {missing}")
+    logging.info("subtask filter total: %d / %d frames %s", len(indices), offset, dict(frames_per_task))
+    return indices
+
+
 class FrameSampler(torch.utils.data.Sampler):
     """
     Custom sampler that only samples data indices falling within specified intervals
     """
-    def __init__(self, dataset, sampler_type, seed: int = 0):
+    def __init__(self, dataset, sampler_type, seed: int = 0, task_include: Sequence[str] = ()):
+        self.task_include = tuple(task_include)
         valid_intervals = self.parse_dataset(dataset, sampler_type)
         self.sample_frames(valid_intervals, len(dataset), seed=seed)
 
@@ -79,6 +126,8 @@ class FrameSampler(torch.utils.data.Sampler):
         """
         if sampler_type == 'subtask':
             return sample_subtask(dataset)
+        elif sampler_type == 'task':
+            return [(i, i) for i in sample_tasks(dataset, self.task_include)]
         else:
             raise ValueError(f"Invalid sampler type: {sampler_type}")
 

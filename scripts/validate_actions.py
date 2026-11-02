@@ -23,6 +23,7 @@ import wandb
 import openpi.policies.policy_config as _policy_config
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.sampler as _sampler
 import openpi.transforms as _transforms
 
 
@@ -132,10 +133,21 @@ def _scalar_from_item(item: dict[str, Any], key: str) -> int | None:
 
 
 def _select_indices(
-    dataset: _data_loader.Dataset, *, mode: str, max_samples: int, sample_stride: int | None
+    dataset: _data_loader.Dataset,
+    *,
+    mode: str,
+    max_samples: int,
+    sample_stride: int | None,
+    candidates: list[int] | None = None,
 ) -> list[int]:
     if max_samples <= 0:
         raise ValueError("--max-samples must be positive")
+    if candidates is not None:
+        # subtask_include config: stride over the matching frames only, so samples span all of them.
+        if mode != "all-frames":
+            raise ValueError("Configs with subtask_include support --mode all-frames only")
+        stride = sample_stride or max(1, len(candidates) // max_samples)
+        return sorted(candidates)[::stride][:max_samples]
     if sample_stride is None:
         # A stride of 1 would score only the first max_samples frames of the first episode.
         sample_stride = max(1, len(dataset) // max_samples)
@@ -196,7 +208,14 @@ def _state_layout(data_config: _config.DataConfig) -> list[int] | None:
 
 def _prepare_raw_dataset(
     train_config: _config.TrainConfig, val_repo_ids: Sequence[str] | None
-) -> tuple[_data_loader.Dataset, _transforms.DataTransformFn, list[int] | None, np.ndarray | None, list[int] | None]:
+) -> tuple[
+    _data_loader.Dataset,
+    _transforms.DataTransformFn,
+    list[int] | None,
+    np.ndarray | None,
+    list[int] | None,
+    list[int] | None,
+]:
     data_factory = _with_validation_repo(train_config.data, val_repo_ids)
     data_config = data_factory.create(train_config.assets_dirs, train_config.model)
     dataset = _data_loader.create_torch_dataset(data_config, train_config.model)
@@ -207,7 +226,11 @@ def _prepare_raw_dataset(
     dataset = _data_loader.TransformedDataset(dataset, [])
     repack = _transforms.compose(data_config.repack_transforms.inputs)
     action_indices, live_dims = _action_layout(data_config)
-    return dataset, repack, action_indices, live_dims, _state_layout(data_config)
+    # Same frame filter as training, so a sub-task checkpoint is scored on that sub-task only.
+    candidates = None
+    if data_config.subtask_include:
+        candidates = _sampler.sample_tasks(dataset, data_config.subtask_include)
+    return dataset, repack, action_indices, live_dims, _state_layout(data_config), candidates
 
 
 def _align_actions(predicted: np.ndarray, target: np.ndarray, action_dim: int | None) -> tuple[np.ndarray, np.ndarray]:
@@ -378,9 +401,13 @@ def validate_actions(
     """
     logging.info("Loading policy from %s", checkpoint_dir)
     policy = _policy_config.create_trained_policy(train_config, checkpoint_dir)
-    dataset, repack, action_indices, live_dims, state_indices = _prepare_raw_dataset(train_config, val_repo_ids)
+    dataset, repack, action_indices, live_dims, state_indices, candidates = _prepare_raw_dataset(
+        train_config, val_repo_ids
+    )
     fps = _dataset_fps(dataset)
-    indices = _select_indices(dataset, mode=mode, max_samples=max_samples, sample_stride=sample_stride)
+    indices = _select_indices(
+        dataset, mode=mode, max_samples=max_samples, sample_stride=sample_stride, candidates=candidates
+    )
     if not indices:
         raise RuntimeError("No validation samples selected")
 
