@@ -3395,6 +3395,70 @@ _CONFIGS = [
         resume=True,
         save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
     ),
+    # pi05_g2_loop_pick_place_v13_ea_only (run V13EAOnly): pi05_g2_loop_pick_place_v2 restricted to the LOOP pass
+    # episodes (success, rating >= 3) via episode_include_path, to measure what the failed/low-rated episodes cost.
+    # Same 19 train sessions, same norm stats (computed on all frames of these sessions), same validation repos
+    # (not in the allow-list, so validated on all episodes like V2), same schedule. 437 pass eps listed, 422 of them
+    # carry pick/place labels (172,605 frames vs V2's 182,971).
+    TrainConfig(
+        name="pi05_g2_loop_pick_place_v13_ea_only",
+        model=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220),
+        freeze_filter=pi0.Pi0Config(pi05=True, action_horizon=30, max_token_len=220).get_freeze_filter(
+            freeze_vision=False, freeze_llm=True
+        ),
+        data=LerobotGo1DataConfig(
+            repo_id=[
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-09-24/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-09-25/s02",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-09-28/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-01/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-02/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-02/s02",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-06/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-07/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-08/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-08/s02",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-12/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-14/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-15/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-16/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-19/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-20/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-21/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-22/s01",
+                "/home/datamentors/data_to_train/g2a0004-infpose-headset_loop/2026-10-23/s01",
+            ],
+            norm_stats_path="/home/datamentors/g2sim/assets_loop_pick_place_v2_train/pi05_g2_loop_pick_place_v2/norm_stats.json",
+            default_prompt=None,
+            use_delta_joint_actions=True,
+            include_waist=True,
+            mask_gripper_state=True,
+            output_dim=21,
+            unmask_waist=True,
+            center_crop_images=True,
+            base_config=DataConfig(
+                prompt_from_task=True,
+                subtask_include=("Pick a towel from a bin.", "Place towel on the table."),
+                episode_include_path=str(
+                    pathlib.Path(__file__).resolve().parent / "episode_lists" / "g2_loop_v2_train_pass_score3plus.json"
+                ),
+            ),
+        ),
+        lr_schedule=_optimizer.WSDSchedule(
+            warmup_steps=1_000, peak_lr=1e-5, total_steps=100_000, decay_steps=10_000, end_lr=1e-6, decay_type="sqrt",
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/datamentors/g2sim/ckpt/checkpoints/manipulation_pi05/params"
+        ),
+        num_workers=8 if os.getenv("DEBUG_MODE") != "true" else 2,
+        batch_size=16 if os.getenv("DEBUG_MODE") != "true" else 2,
+        num_train_steps=100_000,
+        log_interval=20,
+        resume=True,
+        save_interval=1000 if os.getenv("DEBUG_MODE") != "true" else 100,
+    ),
     # !!! DEPRECATED (2026-09-24) -- OLD, DO NOT USE FOR NEW WORK !!!
     # Trained on lerobot_v21, whose observation.state came from
     # /hal/joint_state.position: HALF the true angle on arm joints 1-2 (L1, L2,
