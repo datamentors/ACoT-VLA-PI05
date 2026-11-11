@@ -379,9 +379,18 @@ def create_torch_data_loader(
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     sampler = None
+    if data_config.episode_include_path is not None and not data_config.subtask_include:
+        raise ValueError("episode_include_path is only applied together with subtask_include")
     if data_config.subtask_include:
         from openpi.training.sampler import FrameSampler
-        sampler = FrameSampler(dataset, "task", seed=seed, task_include=data_config.subtask_include)
+        from openpi.training.sampler import load_episode_include
+        sampler = FrameSampler(
+            dataset,
+            "task",
+            seed=seed,
+            task_include=data_config.subtask_include,
+            episode_include=load_episode_include(data_config.episode_include_path),
+        )
         shuffle = False
     elif data_config.dataloader_sampler != '':
         from openpi.training.sampler import FrameSampler

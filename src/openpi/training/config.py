@@ -102,6 +102,9 @@ class DataConfig:
     # Train (and validate_actions) only on frames whose LeRobot task text is one of these (exact match,
     # whitespace-stripped). For v2.1 exports that store each sub-task as its own task, e.g. LOOP. Empty = all frames.
     subtask_include: Sequence[str] = ()
+    # Optional JSON {"<date>/<session>": [episode_index, ...]} applied on top of subtask_include: listed datasets
+    # keep only those episodes (e.g. LOOP pass episodes), unlisted datasets keep all. See sampler.sample_tasks.
+    episode_include_path: str | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None

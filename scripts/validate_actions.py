@@ -229,7 +229,12 @@ def _prepare_raw_dataset(
     # Same frame filter as training, so a sub-task checkpoint is scored on that sub-task only.
     candidates = None
     if data_config.subtask_include:
-        candidates = _sampler.sample_tasks(dataset, data_config.subtask_include)
+        # Episode allow-list keys name training sessions; held-out repos not listed keep all episodes.
+        candidates = _sampler.sample_tasks(
+            dataset,
+            data_config.subtask_include,
+            _sampler.load_episode_include(data_config.episode_include_path),
+        )
     return dataset, repack, action_indices, live_dims, _state_layout(data_config), candidates
 
 
